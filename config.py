@@ -1,8 +1,9 @@
 """Глобальная конфигурация и значения по умолчанию для Tag Manager."""
 
 # --- API (oobabooga / llama.cpp / любой OpenAI-совместимый) ---
-# Порт 5005 — llama-server (llama.cpp). Нативная oobabooga обычно на 5000.
-DEFAULT_API_URL = "http://127.0.0.1:5005/v1"
+# Порт 5000 — нативная oobabooga. llama-server (llama.cpp) обычно на 5005/8080.
+# Своё значение задаётся в UI и запоминается в settings.json (перекрывает дефолт).
+DEFAULT_API_URL = "http://127.0.0.1:5000/v1"
 DEFAULT_MODEL = "local-model"  # заглушка: при старте подменяется активной моделью сервера
 DEFAULT_API_KEY = "not-needed"  # локальному серверу ключ не нужен
 
