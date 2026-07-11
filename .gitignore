@@ -39,3 +39,6 @@ presets.json
 *.swp
 .DS_Store
 Thumbs.db
+
+# --- Локальная карта проекта для Claude Code (личное, не публикуем) ---
+CLAUDE.md
