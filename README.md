@@ -2,6 +2,8 @@
 
 # 🏷️ Tag Manager
 
+[![Русский](https://img.shields.io/badge/Русский-0969da?style=for-the-badge)](README.md)&nbsp;[![English](https://img.shields.io/badge/English-e1e4e8?style=for-the-badge)](README.en.md)
+
 **Генератор и редактор капшенов для датасетов обучения image-моделей (LoRA)**
 
 Локальное веб-приложение на [Streamlit](https://streamlit.io/): размечает папку с картинками
