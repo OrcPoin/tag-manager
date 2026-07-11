@@ -1,0 +1,38 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.env
+
+# --- Рантайм-артефакты приложения (личные данные, локальные пути) ---
+# progress.json — прогресс обработки: содержит абсолютные пути и капшены
+progress.json
+# processing_log.txt — лог прогонов
+processing_log.txt
+# settings.json — «липкие» настройки UI (в т.ч. trigger_word)
+settings.json
+# presets.json — пользовательские пресеты; пример см. presets.example.json
+presets.json
+
+# --- Датасеты / выходные .txt рядом с картинками ---
+*.jpg
+*.jpeg
+*.png
+*.webp
+
+# --- Бэкапы капшенов от массовых операций ---
+*.bak
+
+# --- IDE / ОС ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
