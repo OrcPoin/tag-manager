@@ -48,19 +48,26 @@
 
 <div align="center">
 
-**Главный экран — генерация капшенов**
+<b>Главный экран — генерация капшенов</b><br>
+<img src="docs/screenshot-main.png" alt="Главный экран" width="760">
 
-![Главный экран](docs/screenshot-main.png)
+<br><br>
+
+<details>
+<summary><b>📸 Ещё скриншоты (нажмите, чтобы развернуть)</b></summary>
+<br>
 
 <table>
 <tr>
-<td align="center"><b>Вкладка «Теги» — массовые правки датасета</b><br><img src="docs/screenshot-tags.png" alt="Вкладка Теги"></td>
-<td align="center"><b>Вкладка «Галерея» — просмотр и правка</b><br><img src="docs/screenshot-gallery.png" alt="Вкладка Галерея"></td>
+<td align="center" width="50%"><b>Вкладка «Теги»</b><br><sub>массовые правки датасета</sub><br><img src="docs/screenshot-tags.png" alt="Вкладка Теги"></td>
+<td align="center" width="50%"><b>Вкладка «Галерея»</b><br><sub>просмотр и правка</sub><br><img src="docs/screenshot-gallery.png" alt="Вкладка Галерея"></td>
 </tr>
 </table>
 
-<img src="docs/screenshot-api.png" alt="Настройки API" width="300"><br>
-<sub>Сайдбар: настройки API, параметры генерации и управление прогрессом</sub>
+<b>Сайдбар — настройки API и параметры генерации</b><br>
+<img src="docs/screenshot-api.png" alt="Настройки API" width="280">
+
+</details>
 
 </div>
 
