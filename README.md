@@ -93,15 +93,33 @@
 
 ## 🚀 Быстрый старт
 
-### 1. Установка
+### 1. Скачайте приложение
+
+Нужен установленный **Python 3.10+**. Выберите любой способ:
+
+<details>
+<summary><b>📦 Способ A — скачать ZIP (без Git, проще)</b></summary><br>
+
+1. Откройте страницу [**Releases**](https://github.com/OrcPoin/tag-manager/releases/latest)
+   и скачайте **Source code (zip)** (или кнопкой `Code → Download ZIP` на главной странице репозитория).
+2. Распакуйте архив в удобную папку.
+3. Откройте папку в терминале и установите зависимости:
+   ```bash
+   pip install -r requirements.txt
+   ```
+</details>
+
+<details>
+<summary><b>🔧 Способ B — клонировать через Git (удобно обновлять)</b></summary><br>
 
 ```bash
-git clone https://github.com/OrcPoin/<repo-name>.git
-cd <repo-name>
+git clone https://github.com/OrcPoin/tag-manager.git
+cd tag-manager
 pip install -r requirements.txt
 ```
 
-Требуется **Python 3.10+**.
+Обновление до свежей версии позже — одной командой `git pull`.
+</details>
 
 ### 2. Поднимите локальный OpenAI-совместимый сервер
 
