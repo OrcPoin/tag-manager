@@ -149,6 +149,25 @@ MiniCPM-V, Gemma 3, Llama 3.2 Vision:
 </tr>
 </table>
 
+<details>
+<summary><b>🔌 Важно: как Tag Manager работает с oobabooga (порядок запуска)</b></summary><br>
+
+Tag Manager **сам модель не загружает и сервер не запускает** — он общается с уже
+поднятым [oobabooga](https://github.com/oobabooga/text-generation-webui) по его
+OpenAI-совместимому **API**. Рабочий порядок именно такой:
+
+1. Запустите **oobabooga** (`text-generation-webui`) с включённым API (`--api`).
+2. **Загрузите в нём vision-модель** (вкладка *Model*) и дождитесь, пока она встанет.
+3. В сайдбаре Tag Manager укажите **адрес хоста** oobabooga
+   (например `http://127.0.0.1:5000/v1`) и имя модели — нажмите «Проверить соединение».
+
+Дальше вся работа — это обмен по API: на каждую картинку приложение **шлёт один
+multimodal-запрос** в `/v1/chat/completions` (изображение в base64 + ваш промпт) и
+**получает в ответ** готовый капшен. Самой модели внутри Tag Manager нет — вся генерация
+идёт на стороне oobabooga.
+
+</details>
+
 ### 3. Запустите приложение
 
 ```bash
