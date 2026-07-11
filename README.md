@@ -46,18 +46,21 @@
 
 ## 🖼 Скриншоты
 
-> _Скриншоты будут здесь. Положите PNG в папку `docs/` и они подтянутся._
-
 <div align="center">
 
-<!-- Замените на реальные файлы после того, как положите их в docs/ -->
-<!-- ![Главный экран](docs/screenshot-main.png) -->
-<!-- ![Обработка](docs/screenshot-processing.png) -->
-<!-- ![Вкладка датасета](docs/screenshot-dataset.png) -->
+**Главный экран — генерация капшенов**
 
-| Генерация | Управление датасетом |
-|:---:|:---:|
-| _(docs/screenshot-main.png)_ | _(docs/screenshot-dataset.png)_ |
+![Главный экран](docs/screenshot-main.png)
+
+<table>
+<tr>
+<td align="center"><b>Вкладка «Теги» — массовые правки датасета</b><br><img src="docs/screenshot-tags.png" alt="Вкладка Теги"></td>
+<td align="center"><b>Вкладка «Галерея» — просмотр и правка</b><br><img src="docs/screenshot-gallery.png" alt="Вкладка Галерея"></td>
+</tr>
+</table>
+
+<img src="docs/screenshot-api.png" alt="Настройки API" width="300"><br>
+<sub>Сайдбар: настройки API, параметры генерации и управление прогрессом</sub>
 
 </div>
 
