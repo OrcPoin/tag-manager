@@ -941,7 +941,15 @@ def render_review(task, preview_col, caption_col) -> None:
             st.image(task.image_path, width="stretch")
     with caption_col:
         st.markdown("**Сгенерированный капшен:**")
-        edited = st.text_area("Капшен", task.caption, height=220, key="review_caption")
+        # Streamlit-виджет с key держит своё значение в session_state и ИГНОРИРУЕТ
+        # аргумент value при перерисовке. Поэтому после «Перегенерировать» (когда
+        # task.caption сменился) поле показывало бы старый текст. Синхронизируем
+        # состояние вручную — только когда сменился файл или сам капшен; при наборе
+        # правок task.caption не меняется, так что текст пользователя не затирается.
+        if ss.get("_review_loaded_for") != (task.name, task.caption):
+            ss["review_caption"] = task.caption
+            ss["_review_loaded_for"] = (task.name, task.caption)
+        edited = st.text_area("Капшен", height=220, key="review_caption")
         b1, b2, b3, b4 = st.columns(4)
         if b1.button("✅ Принять"):
             worker.submit_review("accept", edited)
@@ -1485,14 +1493,19 @@ with tab_gen:
         # Диффы обновления
         _diffs = snap.get("update_diffs", [])
         if _diffs:
+            # В ключ виджета вплетаем таймстемп прогона: без него при повторном
+            # обновлении тех же файлов key совпал бы с прошлым разом и text_area
+            # показал бы залипшее старое значение (Streamlit игнорирует value у
+            # keyed-виджета). Нонс = свежая идентичность виджета на каждый прогон.
+            _nonce = int(snap.get("start_ts", 0))
             with st.expander(f"📝 Что изменилось ({len(_diffs)} файлов)"):
                 for _dn, _old, _new in _diffs[:30]:
                     st.markdown(f"**{_dn}**")
                     _dc = st.columns(2)
                     _dc[0].text_area("до", _old, height=120, disabled=True,
-                                     key=f"diff_old_{_dn}")
+                                     key=f"diff_old_{_nonce}_{_dn}")
                     _dc[1].text_area("после", _new, height=120, disabled=True,
-                                     key=f"diff_new_{_dn}")
+                                     key=f"diff_new_{_nonce}_{_dn}")
         # Отложенные на ручной просмотр (политика «Отложить»). Показываем список,
         # иначе выбор этой политики был бы невидим — файлы копятся в скрытом JSON.
         if snap.get("update_deferred", 0) and ss.folder:

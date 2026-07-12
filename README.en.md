@@ -71,11 +71,13 @@ from a VLM and then edit them comfortably.
 - A running server with a **vision** model and an OpenAI-compatible API. Tested with
   [oobabooga](https://github.com/oobabooga/text-generation-webui) and
   [llama.cpp](https://github.com/ggerganov/llama.cpp). Any multimodal model works:
-  Qwen2-VL, LLaVA, Pixtral, MiniCPM-V, Gemma 3, Llama 3.2 Vision.
+  Gemma (MoE), Qwen2.5-VL, LLaVA, Pixtral, MiniCPM-V, Llama 3.2 Vision — see the
+  [FAQ](#faq) for which to pick.
 
 You start the model yourself — e.g. in oobabooga on the *Model* tab. Tag Manager doesn't
 load it: it just connects to an already-running OpenAI-compatible API. A plain text model
-won't do — it will ignore the image.
+won't do — it will ignore the image. Never run local models before? Start with the
+[FAQ](#faq), it walks through everything step by step.
 
 ## Install
 
@@ -86,7 +88,8 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-On Windows you can double-click **`run.bat`** instead of the last command.
+On Windows you can double-click **`run.bat`** instead of the last command. To update to the
+latest version, double-click **`update.bat`** (requires git installed).
 
 ## How to use
 
@@ -128,33 +131,101 @@ untouched.
 ## FAQ
 
 <details>
-<summary>How do I start a server with a vision model?</summary>
+<summary>Never ran local models. Where do I start?</summary>
 
-Tag Manager doesn't launch the model itself — it connects to a running server with an
-OpenAI-compatible API. Two common options:
+Tag Manager doesn't launch the model itself — it connects to an already-running server. So
+first you bring up a server with a vision model, then paste its address into the sidebar.
 
-**llama.cpp (llama-server)**
+Three things you need:
 
-A single binary, minimal setup. Download
-[llama.cpp](https://github.com/ggerganov/llama.cpp/releases) and a GGUF model file
-(e.g. Qwen2.5-VL, LLaVA), then:
+- **A server** — keeps the model in memory and answers over the network. Either
+  `llama-server` from llama.cpp (run from the console) or oobabooga (all via mouse).
+  oobabooga is easier for a first run.
+- **Model files** — vision models usually come as two GGUFs: the model itself and an
+  `mmproj-*.gguf` (the model's "eyes"). More in the mmproj question below.
+- **The API address** — the server listens on a port, e.g. `http://127.0.0.1:5000/v1`.
+  That's what you paste in, then click "Check connection".
+
+Instructions for oobabooga and llama.cpp are below; model choice is there too.
+
+</details>
+
+<details>
+<summary>Running via oobabooga (easier for beginners)</summary>
+
+The model loads and configures via the mouse; MoE and mmproj are picked up automatically.
+
+1. Install oobabooga per the
+   [instructions](https://github.com/oobabooga/text-generation-webui#how-to-install)
+   (there's a one-click installer for Windows).
+2. Put the model files in `text-generation-webui/models/` — the model itself and
+   `mmproj-*.gguf` next to it.
+3. **Model** tab → pick the model → **Load**.
+4. Enable the API: **Session** tab → check `openai` (or launch with `--api`). Default port
+   is `5000`.
+5. In the Tag Manager sidebar enter `http://127.0.0.1:5000/v1` and click "Check
+   connection". The 🔄 button fills in the model name.
+
+</details>
+
+<details>
+<summary>Running via llama.cpp (single binary)</summary>
+
+Lighter on resources, but you attach the model and its "eyes" yourself on the command line.
+Download [llama.cpp](https://github.com/ggerganov/llama.cpp/releases), the model GGUF and
+its `mmproj-*.gguf`, then:
 
 ```bash
-llama-server -m model.gguf --port 5000 -ngl 99
+llama-server -m model.gguf --mmproj mmproj-model.gguf --port 5000 -ngl 99
 ```
 
-In Tag Manager set the API address to `http://127.0.0.1:5000/v1`.
+- `--mmproj` — the vision projector file. Without it images won't work (see the mmproj question).
+- `--port 5000` — the port; you paste it into Tag Manager as `.../5000/v1`.
+- `-ngl 99` — layers offloaded to the GPU (99 = all; lower it if you're short on VRAM).
 
-**oobabooga (text-generation-webui)**
+</details>
 
-A full UI with model management. Install per the
-[instructions](https://github.com/oobabooga/text-generation-webui#how-to-install), load
-a multimodal model on the *Model* tab, enable the API on the *Session* tab (API → OpenAI).
+<details>
+<summary>What is mmproj.gguf and why do I need it?</summary>
 
-In Tag Manager set the API address to `http://127.0.0.1:5000/v1` (oobabooga's default port).
+Without it the vision model can't see images — the single most common reason for "nothing
+works".
 
-A plain text model won't work — it will ignore the image. You need a multimodal (vision)
-model.
+A multimodal GGUF model is usually two files: the model itself (`model.gguf`) and a
+separate vision projector `mmproj-*.gguf`. They live in the same HuggingFace repo, but you
+need to download both. Grab only the main file and the model loads as a text model and
+ignores the image.
+
+- In llama.cpp the projector is attached with `--mmproj mmproj-model.gguf`.
+- In oobabooga just put `mmproj-*.gguf` in the model folder — it's picked up automatically.
+
+</details>
+
+<details>
+<summary>Which model should I pick?</summary>
+
+You need a multimodal (vision) model — a text model will ignore the image.
+
+I personally use **Gemma in its MoE version** (`gemma-4-26B-A4B-it-UD-Q4_K_M.gguf`) for
+quality English descriptions. MoE (Mixture of Experts) means only a fraction of the 26B
+params run per token — in speed and VRAM appetite it's closer to a small model, in quality
+closer to a large one. oobabooga configures MoE automatically; llama.cpp needs no special
+flags for a basic launch.
+
+If you want **tags only**, no description, use [WD14](https://github.com/toriato/stable-diffusion-webui-wd14-tagger)
+rather than a VLM (see [Why not WD14](#why-not-wd14)). Tag Manager's strength is the
+"tags + prose" combo.
+
+Alternatives if Gemma doesn't fit:
+
+- **Qwen2.5-VL** — very detailed, reads text in the image, sizes 3B/7B/72B. Dense (not
+  MoE), so large versions are heavier on VRAM.
+- **MiniCPM-V** — light and fast, good for weak machines; falls behind on complex scenes.
+- **Pixtral** — strong whole-scene understanding, but memory-hungry.
+- **LLaVA** — a classic with tons of guides, but older and weaker on detail.
+- **Llama 3.2 Vision** — stable, average tag detail.
+
+Take as many params as fit in your VRAM with headroom. And `mmproj` is required for any of them.
 
 </details>
 
