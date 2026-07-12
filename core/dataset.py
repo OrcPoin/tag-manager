@@ -191,6 +191,44 @@ def replace_substring(caption: str, find: str, replace: str) -> str:
     return caption.replace(find, replace)
 
 
+def sanitize_caption(
+    caption: str,
+    dedupe: bool = True,
+    collapse_spaces: bool = True,
+    lowercase: bool = False,
+) -> str:
+    """Нормализовать тег-строки капшена, не трогая прозу и скобочные блоки.
+
+    Чистит то, что копится после генерации:
+      * dedupe — убрать повторяющиеся теги (сравнение без учёта регистра,
+        остаётся первое вхождение);
+      * collapse_spaces — схлопнуть двойные пробелы ВНУТРИ тега ("blue  hair");
+      * lowercase — привести теги к нижнему регистру.
+    Пустые фрагменты и лишние запятые отсекаются самим _rebuild_tag_line.
+    Идемпотентно: повторный прогон с теми же флагами ничего не меняет.
+    """
+    def _tf(frags):
+        out = []
+        seen = set()
+        for f in frags:
+            g = f.strip()
+            if not g:
+                continue
+            if collapse_spaces:
+                g = " ".join(g.split())
+            if lowercase:
+                g = g.lower()
+            if dedupe:
+                key = g.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+            out.append(g)
+        return out
+
+    return apply_to_tag_lines(caption, _tf)
+
+
 # --------------------------------------------------------------------------- #
 # Триггер-слово (ретрофит по всему датасету)
 # --------------------------------------------------------------------------- #

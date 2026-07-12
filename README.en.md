@@ -22,9 +22,11 @@ datasets — locally, with your own vision models.
 <td align="center" width="50%"><b>“Tags” tab</b><br><sub>bulk dataset edits</sub><br><img src="docs/screenshot-tags.png" alt="Tags tab"></td>
 <td align="center" width="50%"><b>“Gallery” tab</b><br><sub>view and edit</sub><br><img src="docs/screenshot-gallery.png" alt="Gallery tab"></td>
 </tr>
+<tr>
+<td align="center" width="50%"><b>“Health” tab</b><br><sub>dataset audit before training</sub><br><img src="docs/screenshot-health.png" alt="Health tab"></td>
+<td align="center" width="50%"><b>Sidebar</b><br><sub>API and generation settings</sub><br><img src="docs/screenshot-api.png" alt="API settings"></td>
+</tr>
 </table>
-<b>Sidebar — API settings and generation parameters</b><br>
-<img src="docs/screenshot-api.png" alt="API settings" width="280">
 </details>
 
 </div>
@@ -46,9 +48,10 @@ Runs fully locally. All you need is your own vision model behind an OpenAI-compa
 
 - Caption generation via a local VLM (OpenAI-compatible API)
 - Hybrid format: booru tags + natural-language description
-- Bulk tag editing — with preview and a `.bak` backup
+- Bulk tag editing and cleanup (duplicates, spaces, case) — with preview and a `.bak` backup
 - Trigger word across the whole dataset at once
 - Gallery with tag search, manual edit and delete
+- Dataset audit before training: broken files, duplicates, orphans, weak captions
 - Pause and resume on long runs
 
 ## Why not WD14
@@ -95,7 +98,8 @@ continue later; in resume mode the app only finishes the unprocessed files.
 Once the dataset is ready, the **“Tags”** and **“Gallery”** tabs let you tidy up: check
 tag frequencies, bulk-edit tags (with preview and `.bak`), set the trigger word, browse
 the gallery with search by tag. Edits only touch the tag lines — prose and parenthesized
-character blocks are left alone.
+character blocks are left alone. Before training itself, the **“Health”** tab surfaces
+broken files, duplicates, orphans and weak captions, and moves the junk into quarantine.
 
 ## Caption format
 

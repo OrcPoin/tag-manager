@@ -1,4 +1,4 @@
-# st.image(use_container_width=...) требует Streamlit >= 1.32
-streamlit>=1.32
+# width="stretch" (замена use_container_width) требует Streamlit >= 1.49
+streamlit>=1.49
 openai>=1.0
 pillow>=10.0

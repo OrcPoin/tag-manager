@@ -14,6 +14,7 @@ import streamlit as st
 import config
 from core import app_settings
 from core import dataset as ds
+from core import health
 from core import presets as presets_mod
 from core.caption_client import CaptionClient
 from core.folder_dialog import pick_folder
@@ -159,6 +160,10 @@ def _tags_build_op(desc: tuple):
         return lambda t: ds.replace_whole_tag(t, desc[1], desc[2])
     if kind == "replace_sub":
         return lambda t: ds.replace_substring(t, desc[1], desc[2])
+    if kind == "sanitize":
+        return lambda t: ds.sanitize_caption(
+            t, dedupe=desc[1], collapse_spaces=desc[2], lowercase=desc[3]
+        )
     if kind == "add_tag":
         return lambda t: ds.add_tag_to_caption(t, desc[1], desc[2])
     if kind == "del_tag":
@@ -170,6 +175,44 @@ def _tags_stage(desc: tuple, label: str, files: list) -> None:
     """Посчитать предпросмотр операции и положить в ss.tags_pending (без записи)."""
     prev = ds.preview_operation(files, _tags_build_op(desc))
     ss.tags_pending = {"desc": desc, "label": label, "preview": prev}
+
+
+def _browse_into(input_key: str) -> None:
+    """Открыть системный диалог и записать выбранную папку в ss[input_key].
+
+    Единая логика кнопки «📁 Обзор» для всех вкладок. ВАЖНО: вызывается как
+    on_click-колбэк, а не инлайн. Колбэк выполняется ДО инстанцирования виджетов
+    в следующем прогоне, поэтому запись в ключ виджета ввода легальна (инлайн-
+    запись после создания text_input Streamlit запрещает). Пустой результат
+    (диалог недоступен/отменён) — мягкий тост, поле не трогаем.
+    """
+    picked = pick_folder(ss.get(input_key, ""))
+    if picked:
+        ss[input_key] = picked
+    else:
+        st.toast("Диалог недоступен — введите путь вручную")
+
+
+def _folder_picker_row(input_key: str, rec_key: str, rec_default: bool,
+                       default_folder: str) -> tuple[str, bool]:
+    """Общий ряд выбора папки: текстовый путь + «📁 Обзор» + «Рекурсивно».
+
+    Используется на вкладках «Теги» и «Здоровье» (у «Генерации»/«Галереи» свои
+    компоновки). Ключи виджетов уникальны между вкладками. Путь из диалога пишем
+    через on_click-колбэк (см. _browse_into). vertical_alignment="bottom"
+    выравнивает кнопку/галку по нижней кромке поля (иначе они уезжают вверх под
+    подпись поля). Возврат: (путь, рекурсивно).
+    """
+    ss.setdefault(input_key, default_folder)
+    c1, c2, c3 = st.columns([5, 1, 1], vertical_alignment="bottom")
+    with c1:
+        folder = st.text_input("Папка датасета", key=input_key)
+    with c2:
+        st.button("📁 Обзор", key=f"{input_key}_browse", width="stretch",
+                  on_click=_browse_into, args=(input_key,))
+    with c3:
+        recursive = st.checkbox("Рекурсивно", rec_default, key=rec_key)
+    return folder, recursive
 
 
 def render_tags_tab() -> None:
@@ -189,13 +232,9 @@ def render_tags_tab() -> None:
                    "не конфликтовать с записью файлов — остановите обработку.")
         return
 
-    col1, col2 = st.columns([5, 1])
-    with col1:
-        folder = st.text_input("Папка датасета", ss.tags_folder or ss.folder)
-    with col2:
-        st.write("")
-        st.write("")
-        recursive = st.checkbox("Рекурсивно", ss.tags_recursive)
+    folder, recursive = _folder_picker_row(
+        "tags_folder_input", "tags_rec", ss.tags_recursive,
+        ss.tags_folder or ss.folder)
 
     if st.button("🔍 Сканировать датасет"):
         if os.path.isdir(folder):
@@ -230,10 +269,10 @@ def render_tags_tab() -> None:
     with op_tabs[0]:
         trig = st.text_input("Триггер-слово", ss.trigger_word)
         tc = st.columns(2)
-        if tc[0].button("Добавить во все", use_container_width=True,
+        if tc[0].button("Добавить во все", width="stretch",
                         disabled=not trig.strip()):
             _tags_stage(("trigger_add", trig), f"Добавить триггер «{trig}»", files)
-        if tc[1].button("Убрать из всех", use_container_width=True,
+        if tc[1].button("Убрать из всех", width="stretch",
                         disabled=not trig.strip()):
             _tags_stage(("trigger_del", trig), f"Убрать триггер «{trig}»", files)
         st.caption("Ретрофит триггера к уже готовым капшенам. Идемпотентно: "
@@ -253,6 +292,19 @@ def render_tags_tab() -> None:
             else:
                 _tags_stage(("replace_sub", find, repl),
                             f"Подстрока «{find}» → «{repl}»", files)
+
+        st.divider()
+        st.markdown("**Чистка тегов** — нормализация тег-строк (проза не тронута)")
+        sc = st.columns(3)
+        s_dedupe = sc[0].checkbox("Убрать дубли", True)
+        s_ws = sc[1].checkbox("Схлопнуть пробелы", True)
+        s_lower = sc[2].checkbox("В нижний регистр", False)
+        if st.button("Предпросмотр чистки",
+                     disabled=not (s_dedupe or s_ws or s_lower)):
+            _tags_stage(("sanitize", s_dedupe, s_ws, s_lower), "Чистка тегов", files)
+        st.caption("Дубли — по совпадению без учёта регистра, остаётся первый. "
+                   "«Схлопнуть пробелы» убирает двойные пробелы внутри тега. "
+                   "Пустые фрагменты и лишние запятые убираются всегда.")
 
     with op_tabs[2]:
         ac = st.columns(2)
@@ -282,7 +334,7 @@ def render_tags_tab() -> None:
                 items = items[::-1]
             rows = [{"тег": t, "файлов": c} for t, c in items[: int(n)]]
             st.caption(f"Уникальных тегов: {len(counter)} · прочитано файлов: {read}")
-            st.dataframe(rows, use_container_width=True, height=380)
+            st.dataframe(rows, width="stretch", height=380)
 
     # --- общая staged-область: предпросмотр + применение ---
     pend = ss.tags_pending
@@ -305,7 +357,7 @@ def render_tags_tab() -> None:
                                      ss.tags_backup)
         pc = st.columns(2)
         if pc[0].button("✅ Применить", type="primary",
-                        disabled=prev["changed"] == 0, use_container_width=True):
+                        disabled=prev["changed"] == 0, width="stretch"):
             res = ds.apply_operation(files, _tags_build_op(pend["desc"]),
                                      backup=ss.tags_backup)
             logger.info(f"Массовая правка «{pend['label']}»: изменено "
@@ -315,7 +367,7 @@ def render_tags_tab() -> None:
             ss.tags_pending = None
             ss.tags_freq = None
             st.rerun()
-        if pc[1].button("Отмена", use_container_width=True):
+        if pc[1].button("Отмена", width="stretch"):
             ss.tags_pending = None
             st.rerun()
 
@@ -364,6 +416,17 @@ def _thumbnail(path: str, mtime: float, size: int = THUMB_PX) -> bytes | None:
         return None
 
 
+@st.cache_data(show_spinner=False, max_entries=8192)
+def _probe_cached(path: str, mtime: float, size: int) -> dict:
+    """Кэш пер-файлового probe+hash по (path, mtime, size).
+
+    Повторный скан датасета пересчитывает только изменившиеся файлы — на тысячах
+    картинок это разница между «секунды» и «десятки секунд». mtime/size в ключе
+    гарантируют инвалидацию при подмене файла.
+    """
+    return health.probe_and_hash(path, mtime, size)
+
+
 def _gallery_filtered() -> list[dict]:
     """Применить фильтры «без капшена»/поиск к ss.gallery_all (in-memory, быстро)."""
     items = ss.gallery_all
@@ -402,23 +465,23 @@ def _gallery_editor(items: list[dict]) -> None:
     item = items[idx]
 
     top = st.columns([1, 1, 4, 1])
-    if top[0].button("⬅️ К сетке", use_container_width=True):
+    if top[0].button("⬅️ К сетке", width="stretch"):
         ss.gallery_open = None
         st.rerun()
-    if top[1].button("‹ Пред", use_container_width=True, disabled=idx == 0):
+    if top[1].button("‹ Пред", width="stretch", disabled=idx == 0):
         ss.gallery_open = paths[idx - 1]
         st.rerun()
     top[2].markdown(
         f"**{os.path.basename(item['image'])}** &nbsp; · &nbsp; {idx + 1} из {len(items)}"
     )
-    if top[3].button("След ›", use_container_width=True, disabled=idx >= len(items) - 1):
+    if top[3].button("След ›", width="stretch", disabled=idx >= len(items) - 1):
         ss.gallery_open = paths[idx + 1]
         st.rerun()
 
     img_col, edit_col = st.columns([1, 1])
     with img_col:
         if os.path.exists(item["image"]):
-            st.image(item["image"], use_container_width=True)
+            st.image(item["image"], width="stretch")
     with edit_col:
         # Ключ привязан к пути — при переходе на другое фото text_area
         # пересоздаётся с капшеном нового файла (а не держит старый текст).
@@ -427,7 +490,7 @@ def _gallery_editor(items: list[dict]) -> None:
 
         busy = worker.is_alive()
         bcols = st.columns(2)
-        if bcols[0].button("💾 Сохранить", type="primary", use_container_width=True,
+        if bcols[0].button("💾 Сохранить", type="primary", width="stretch",
                            disabled=busy):
             if ds.write_caption(item["image"], edited, backup=True):
                 item["caption"] = edited.strip()
@@ -436,7 +499,7 @@ def _gallery_editor(items: list[dict]) -> None:
                 st.rerun()
             else:
                 st.error("Не удалось записать файл")
-        if bcols[1].button("🔄 Перегенерировать", use_container_width=True,
+        if bcols[1].button("🔄 Перегенерировать", width="stretch",
                            disabled=busy,
                            help="Сгенерировать капшен этого фото заново через LLM. "
                                 "Займёт столько же, сколько обычная генерация одного файла."):
@@ -472,13 +535,13 @@ def _gallery_multiaction(items: list[dict]) -> None:
     trig = ac[1].text_input("Триггер", ss.trigger_word, key="gal_ma_trig")
 
     b = st.columns(4)
-    if b[0].button("➕ Добавить тег", disabled=not tag.strip(), use_container_width=True):
+    if b[0].button("➕ Добавить тег", disabled=not tag.strip(), width="stretch"):
         ss.gallery_pending = (("add_tag", tag, False), f"Добавить тег «{tag}»", sel_txt)
-    if b[1].button("➖ Удалить тег", disabled=not tag.strip(), use_container_width=True):
+    if b[1].button("➖ Удалить тег", disabled=not tag.strip(), width="stretch"):
         ss.gallery_pending = (("del_tag", tag), f"Удалить тег «{tag}»", sel_txt)
-    if b[2].button("🎯 +Триггер", disabled=not trig.strip(), use_container_width=True):
+    if b[2].button("🎯 +Триггер", disabled=not trig.strip(), width="stretch"):
         ss.gallery_pending = (("trigger_add", trig), f"Добавить триггер «{trig}»", sel_txt)
-    if b[3].button("🗑️ Удалить капшены", use_container_width=True):
+    if b[3].button("🗑️ Удалить капшены", width="stretch"):
         ss.gallery_pending = (("delete", sel_imgs), "Удалить капшены выбранных", sel_txt)
 
     pend = ss.gallery_pending
@@ -499,7 +562,7 @@ def _gallery_multiaction(items: list[dict]) -> None:
                     dc[1].text_area("после", after, height=120, disabled=True,
                                     key=f"gma_a_{name}")
         pc = st.columns(2)
-        if pc[0].button("✅ Применить", type="primary", use_container_width=True):
+        if pc[0].button("✅ Применить", type="primary", width="stretch"):
             if desc[0] == "delete":
                 n = ds.delete_captions(desc[1], backup=True)
                 msg = f"Удалено капшенов: {n}"
@@ -514,7 +577,7 @@ def _gallery_multiaction(items: list[dict]) -> None:
                 it["has_caption"] = bool(it["caption"].strip())
             ss.gallery_pending = None
             st.rerun()
-        if pc[1].button("Отмена", use_container_width=True):
+        if pc[1].button("Отмена", width="stretch"):
             ss.gallery_pending = None
             st.rerun()
 
@@ -526,21 +589,21 @@ def _gallery_grid(items: list[dict]) -> None:
     ss.gallery_page = min(ss.gallery_page, pages - 1)
 
     nav = st.columns([1, 2, 1, 2])
-    if nav[0].button("‹", use_container_width=True, disabled=ss.gallery_page == 0):
+    if nav[0].button("‹", width="stretch", disabled=ss.gallery_page == 0):
         ss.gallery_page -= 1
         st.rerun()
     nav[1].markdown(f"<div style='text-align:center'>Стр. {ss.gallery_page + 1} / {pages} "
                     f"· фото: {total}</div>", unsafe_allow_html=True)
-    if nav[2].button("›", use_container_width=True, disabled=ss.gallery_page >= pages - 1):
+    if nav[2].button("›", width="stretch", disabled=ss.gallery_page >= pages - 1):
         ss.gallery_page += 1
         st.rerun()
     with nav[3]:
         sc = st.columns(2)
-        if sc[0].button("Выбрать стр.", use_container_width=True):
+        if sc[0].button("Выбрать стр.", width="stretch"):
             for it in items[ss.gallery_page * GALLERY_PAGE:(ss.gallery_page + 1) * GALLERY_PAGE]:
                 ss.gallery_selected.add(it["image"])
             st.rerun()
-        if sc[1].button("Снять выбор", use_container_width=True):
+        if sc[1].button("Снять выбор", width="stretch"):
             ss.gallery_selected = set()
             st.rerun()
 
@@ -559,7 +622,7 @@ def _gallery_grid(items: list[dict]) -> None:
                     mt = 0.0
                 thumb = _thumbnail(it["image"], mt)
                 if thumb is not None:
-                    st.image(thumb, use_container_width=True)
+                    st.image(thumb, width="stretch")
                 else:
                     st.caption("🖼️ (нет превью)")
                 mark = "✅" if it["has_caption"] else "⚠️"
@@ -573,7 +636,7 @@ def _gallery_grid(items: list[dict]) -> None:
                 elif not new_checked and checked:
                     ss.gallery_selected.discard(it["image"])
                 if st.button("✏️ Открыть", key=f"gal_open_{it['image']}",
-                             use_container_width=True):
+                             width="stretch"):
                     ss.gallery_open = it["image"]
                     ss.gallery_pending = None
                     st.rerun()
@@ -592,16 +655,14 @@ def render_gallery_tab() -> None:
 
     st.subheader("Галерея — просмотр и правка капшенов")
 
-    c = st.columns([5, 1, 1])
-    folder = c[0].text_input("Папка датасета", ss.gallery_folder or ss.folder,
-                             key="gallery_folder_input")
-    c[1].write("")
-    c[1].write("")
-    recursive = c[1].checkbox("Рекурсивно", ss.gallery_recursive,
+    ss.setdefault("gallery_folder_input", ss.gallery_folder or ss.folder)
+    c = st.columns([5, 1, 1, 1], vertical_alignment="bottom")
+    folder = c[0].text_input("Папка датасета", key="gallery_folder_input")
+    c[1].button("📁 Обзор", key="gallery_browse", width="stretch",
+                on_click=_browse_into, args=("gallery_folder_input",))
+    recursive = c[2].checkbox("Рекурсивно", ss.gallery_recursive,
                               key="gallery_recursive_cb")
-    c[2].write("")
-    c[2].write("")
-    if c[2].button("🔍 Сканировать", use_container_width=True):
+    if c[3].button("🔍 Сканировать", width="stretch"):
         if os.path.isdir(folder):
             _gallery_scan(folder, recursive)
             st.toast(f"Изображений: {len(ss.gallery_all)}")
@@ -650,7 +711,7 @@ with st.sidebar:
     with mcol2:
         st.write("")
         st.write("")
-        if st.button("🔄", use_container_width=True, help="Подтянуть активную модель с сервера"):
+        if st.button("🔄", width="stretch", help="Подтянуть активную модель с сервера"):
             detected = get_client().active_model()
             if detected:
                 ss.model = detected
@@ -688,14 +749,14 @@ with st.sidebar:
     # settings.json, чтобы при следующем запуске они восстановились сами.
     app_settings.save_settings({k: ss[k] for k in app_settings.PERSISTED_KEYS if k in ss})
 
-    if st.button("🔌 Проверить соединение", use_container_width=True):
+    if st.button("🔌 Проверить соединение", width="stretch"):
         ok, msg = get_client().check_connection()
         (st.success if ok else st.error)(msg)
         logger.info(f"Проверка соединения: {msg}")
 
     st.divider()
     st.caption("Прогресс")
-    if st.button("💾 Продолжить прошлый прогон", use_container_width=True,
+    if st.button("💾 Продолжить прошлый прогон", width="stretch",
                  disabled=worker.is_alive()):
         if proc.load_progress():
             # Восстанавливаем папку и СРАЗУ продолжаем цикл с сохранённого места
@@ -707,7 +768,7 @@ with st.sidebar:
             st.rerun()
         else:
             st.warning("Сохранённый прогресс не найден")
-    if st.button("🗑️ Сбросить прогресс", use_container_width=True,
+    if st.button("🗑️ Сбросить прогресс", width="stretch",
                  disabled=worker.is_alive()):
         proc.clear_progress()
         st.info("Файл прогресса удалён")
@@ -720,7 +781,7 @@ def render_review(task, preview_col, caption_col) -> None:
     with preview_col:
         st.markdown(f"**Текущий файл:** `{task.name}`")
         if os.path.exists(task.image_path):
-            st.image(task.image_path, use_container_width=True)
+            st.image(task.image_path, width="stretch")
     with caption_col:
         st.markdown("**Сгенерированный капшен:**")
         edited = st.text_area("Капшен", task.caption, height=220, key="review_caption")
@@ -744,12 +805,247 @@ def render_review(task, preview_col, caption_col) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Вкладка «Здоровье датасета»: аудит перед обучением + карантин
+# --------------------------------------------------------------------------- #
+def _health_thumbs(paths: list[str], cols: int = 6, limit: int = 24) -> None:
+    """Сетка миниатюр для списка путей (обрезается до limit)."""
+    shown = paths[:limit]
+    for row_start in range(0, len(shown), cols):
+        row = st.columns(cols)
+        for i, path in enumerate(shown[row_start:row_start + cols]):
+            with row[i]:
+                try:
+                    data = _thumbnail(path, os.path.getmtime(path))
+                except OSError:
+                    data = None
+                if data:
+                    st.image(data, caption=os.path.basename(path))
+                else:
+                    st.caption(os.path.basename(path))
+    if len(paths) > limit:
+        st.caption(f"…и ещё {len(paths) - limit}")
+
+
+def _health_quarantine(paths: list[str], reason: str) -> None:
+    """Перенести paths в карантин и сбросить скан (счётчики устареют)."""
+    moved = health.quarantine(paths, ss.health_folder, reason)
+    ss.health = None
+    st.toast(f"В карантин перенесено: {moved} (папка _rejected/{reason}/)")
+
+
+def render_health_tab() -> None:
+    ss.setdefault("health_folder", "")
+    ss.setdefault("health_recursive", False)
+    ss.setdefault("health", None)
+
+    st.subheader("Аудит датасета перед обучением")
+
+    if worker.is_alive():
+        st.warning("Идёт генерация капшенов. Аудит и карантин заблокированы, чтобы "
+                   "не конфликтовать с записью файлов — остановите обработку.")
+        return
+
+    folder, recursive = _folder_picker_row(
+        "health_folder_input", "health_rec", ss.health_recursive,
+        ss.health_folder or ss.folder)
+
+    if st.button("🩺 Сканировать датасет"):
+        if not os.path.isdir(folder):
+            st.error("Папка не найдена")
+        else:
+            images = find_images(folder, recursive)
+            probes: dict[str, dict] = {}
+            bar = st.progress(0.0, "Сканирование…")
+            for i, path in enumerate(images, 1):
+                try:
+                    stt = os.stat(path)
+                    probes[path] = _probe_cached(path, stt.st_mtime, stt.st_size)
+                except OSError as exc:
+                    probes[path] = {"ok": False, "error": str(exc), "md5": None,
+                                    "dhash": None, "mode": "", "animated": False,
+                                    "width": 0, "height": 0, "format": ""}
+                if i % 25 == 0 or i == len(images):
+                    bar.progress(i / max(1, len(images)),
+                                 f"Сканирование… {i}/{len(images)}")
+            bar.empty()
+            ss.health_folder = folder
+            ss.health_recursive = recursive
+            ss.health = {
+                "images": images,
+                "probes": probes,
+                "broken": [p for p, pr in probes.items() if not pr.get("ok")],
+                "exact": health.group_exact(
+                    {p: pr.get("md5") for p, pr in probes.items()}),
+                "orphans": health.orphan_captions(folder, recursive),
+                "collisions": health.stem_collisions(images),
+                "captions": health.caption_issues(images, ss.trigger_word),
+                "formats": health.format_issues(probes),
+            }
+            st.toast(f"Просканировано картинок: {len(images)}")
+
+    data = ss.health
+    if not data:
+        st.info("Укажите папку датасета и нажмите «Сканировать датасет».")
+        return
+
+    probes = data["probes"]
+    images = data["images"]
+
+    # --- 1. Сводка ---
+    with st.expander("📋 Сводка", expanded=True):
+        good = [p for p in images if probes.get(p, {}).get("ok")]
+        captioned = sum(1 for p in images if ds.read_caption(p).strip())
+        total_bytes = 0
+        dims = []
+        for p in good:
+            pr = probes[p]
+            dims.append((pr["width"], pr["height"]))
+            try:
+                total_bytes += os.path.getsize(p)
+            except OSError:
+                pass
+        mc = st.columns(4)
+        mc[0].metric("Картинок", len(images))
+        mc[1].metric("С капшеном", captioned)
+        cover = f"{100 * captioned / len(images):.0f}%" if images else "—"
+        mc[2].metric("Покрытие", cover)
+        mc[3].metric("Размер на диске", f"{total_bytes / (1 << 20):.1f} МБ")
+        if dims:
+            ws = sorted(w for w, _ in dims)
+            hs = sorted(h for _, h in dims)
+            med = (ws[len(ws) // 2], hs[len(hs) // 2])
+            st.caption(f"Разрешение (инфо): min {min(ws)}×{min(hs)}, "
+                       f"медиана {med[0]}×{med[1]}, max {max(ws)}×{max(hs)}.")
+        if len(images) < config.HEALTH_MIN_DATASET:
+            st.warning(f"Картинок меньше {config.HEALTH_MIN_DATASET} — маловато для "
+                       "устойчивого обучения LoRA.")
+        if data["collisions"]:
+            st.warning(f"Коллизии имён (одно имя, разные расширения → делят один "
+                       f".txt): {len(data['collisions'])}. Разберите в «Дубли».")
+
+    # --- 2. Битые / нечитаемые ---
+    broken = data["broken"]
+    with st.expander(f"🧨 Битые / нечитаемые — {len(broken)}"):
+        if not broken:
+            st.success("Битых файлов не найдено.")
+        else:
+            for p in broken[:50]:
+                st.text(f"{os.path.basename(p)} — {probes[p].get('error', '')}")
+            if len(broken) > 50:
+                st.caption(f"…и ещё {len(broken) - 50}")
+            if st.button("В карантин все битые", key="q_broken"):
+                _health_quarantine(broken, "broken")
+                st.rerun()
+
+    # --- 3. Сироты ---
+    orphans = data["orphans"]
+    with st.expander(f"👻 Сироты (.txt без картинки) — {len(orphans)}"):
+        if not orphans:
+            st.success("Осиротевших .txt нет.")
+        else:
+            for p in orphans[:50]:
+                st.text(os.path.basename(p))
+            if len(orphans) > 50:
+                st.caption(f"…и ещё {len(orphans) - 50}")
+            if st.button("В карантин все сироты", key="q_orphans"):
+                _health_quarantine(orphans, "orphan_txt")
+                st.rerun()
+
+    # --- 4. Дубли ---
+    with st.expander(f"👯 Дубли — точных {len(data['exact'])}"):
+        thr = st.slider("Порог похожести (Hamming dhash)", 0, 16,
+                        config.DUP_HAMMING_THRESHOLD, key="dup_thr",
+                        help="Меньше — строже (только очень похожие). Больше — ловит "
+                             "и слабо похожие, но растёт риск ложных совпадений.")
+        near = health.group_near(
+            {p: pr.get("dhash") for p, pr in probes.items() if pr.get("ok")}, thr)
+        st.caption(f"Точные дубли (md5): {len(data['exact'])} групп · "
+                   f"Похожие (dhash ≤ {thr}): {len(near)} групп.")
+
+        def _dup_groups(groups: list[list[str]], key_prefix: str) -> None:
+            for gi, group in enumerate(groups):
+                st.markdown(f"**Группа {gi + 1}** — {len(group)} шт. "
+                            f"(оставляем первый, остальные → карантин)")
+                _health_thumbs(group, cols=6, limit=12)
+                if st.button("Лишние → карантин", key=f"{key_prefix}_{gi}"):
+                    _health_quarantine(group[1:], "duplicates")
+                    st.rerun()
+
+        if data["exact"]:
+            st.markdown("##### Точные (одинаковые байты)")
+            _dup_groups(data["exact"], "q_exact")
+        if near:
+            st.markdown("##### Похожие (перцептивно)")
+            _dup_groups(near, "q_near")
+        if not data["exact"] and not near:
+            st.success("Дублей не найдено.")
+
+    # --- 5. Здоровье капшенов ---
+    ci = data["captions"]
+    total_issues = sum(len(v) for v in ci.values())
+    with st.expander(f"📝 Здоровье капшенов — проблем {total_issues}"):
+        labels = {
+            "empty": "Пустые / нет .txt", "short": "Слишком короткие",
+            "only_tags": "Только теги", "too_long": "Слишком длинные",
+            "missing_trigger": "Без триггера", "unreadable": "Не читаются (не UTF-8)",
+        }
+        for key, label in labels.items():
+            paths = ci.get(key, [])
+            if not paths:
+                continue
+            st.markdown(f"**{label}** — {len(paths)}")
+            st.caption("  ".join(os.path.basename(p) for p in paths[:20])
+                       + (" …" if len(paths) > 20 else ""))
+        if ci.get("missing_trigger") and ss.trigger_word.strip():
+            if st.button(f"Проставить триггер «{ss.trigger_word}» этим файлам",
+                         key="fix_trigger"):
+                op = lambda t: ds.apply_trigger(t, ss.trigger_word)  # noqa: E731
+                res = ds.apply_operation(
+                    [ds.txt_path_for(p) for p in ci["missing_trigger"]],
+                    op, backup=True)
+                st.toast(f"Обновлено файлов: {res['changed']}")
+                ss.health = None
+                st.rerun()
+        if ci.get("empty"):
+            st.caption("Пустые капшены удобно дозаполнить на вкладке «Галерея» "
+                       "(фильтр «без капшена») или прогнать генерацию.")
+        if total_issues == 0:
+            st.success("Проблем с капшенами не найдено.")
+
+    # --- 6. Формат / цвет ---
+    fmt = data["formats"]
+    with st.expander(f"🎨 Формат / цвет — non-RGB {len(fmt['non_rgb'])}, "
+                     f"анимаций {len(fmt['animated'])}"):
+        if fmt["non_rgb"]:
+            st.markdown(f"**Не-RGB** — {len(fmt['non_rgb'])} "
+                        "(RGBA/L/P/CMYK: цвет/альфа могут поехать при обучении)")
+            st.caption("  ".join(os.path.basename(p) for p in fmt["non_rgb"][:20]))
+            if st.button("Конвертировать все в RGB (оригиналы в _rejected/nonrgb/)",
+                         key="fix_rgb"):
+                n = sum(health.convert_to_rgb(p, ss.health_folder)
+                        for p in fmt["non_rgb"])
+                st.toast(f"Сконвертировано: {n}")
+                ss.health = None
+                st.rerun()
+        if fmt["animated"]:
+            st.markdown(f"**Анимированные** — {len(fmt['animated'])} "
+                        "(тренер возьмёт только первый кадр)")
+            st.caption("  ".join(os.path.basename(p) for p in fmt["animated"][:20]))
+            if st.button("Анимации → карантин", key="q_anim"):
+                _health_quarantine(fmt["animated"], "animated")
+                st.rerun()
+        if not fmt["non_rgb"] and not fmt["animated"]:
+            st.success("Проблем с форматом/цветом не найдено.")
+
+
+# --------------------------------------------------------------------------- #
 # Основная область
 # --------------------------------------------------------------------------- #
 st.title("🏷️ Tag Manager")
 st.caption("Генерация детальных капшенов для изображений через локальный LLM")
 
-tab_gen, tab_gallery, tab_tags = st.tabs(["🤖 Генерация", "🖼️ Галерея", "🏷️ Теги"])
+tab_gen, tab_gallery, tab_tags, tab_health = st.tabs(
+    ["🤖 Генерация", "🖼️ Галерея", "🏷️ Теги", "🩺 Здоровье"])
 
 with tab_gallery:
     render_gallery_tab()
@@ -757,16 +1053,17 @@ with tab_gallery:
 with tab_tags:
     render_tags_tab()
 
+with tab_health:
+    render_health_tab()
+
 with tab_gen:
     # --- Выбор папки и режима ---
     st.subheader("1. Папка и режим")
-    col_f1, col_f2 = st.columns([5, 1])
+    col_f1, col_f2 = st.columns([5, 1], vertical_alignment="bottom")
     with col_f1:
         ss.folder = st.text_input("Путь к папке с изображениями", ss.folder)
     with col_f2:
-        st.write("")
-        st.write("")
-        if st.button("📁 Обзор", use_container_width=True):
+        if st.button("📁 Обзор", width="stretch"):
             picked = pick_folder(ss.folder)
             if picked:
                 ss.folder = picked
@@ -829,7 +1126,7 @@ with tab_gen:
     with col_sp2:
         st.write("")
         st.write("")
-        if st.button("💾 Сохранить пресет", use_container_width=True):
+        if st.button("💾 Сохранить пресет", width="stretch"):
             try:
                 presets_mod.save_preset(new_preset_name, ss.system_prompt, ss.user_prompt)
                 ss.presets = presets_mod.load_presets()
@@ -840,7 +1137,7 @@ with tab_gen:
     with col_sp3:
         st.write("")
         st.write("")
-        if st.button("🗑️ Удалить пресет", use_container_width=True):
+        if st.button("🗑️ Удалить пресет", width="stretch"):
             if presets_mod.delete_preset(ss.preset_name):
                 ss.presets = presets_mod.load_presets()
                 st.success("Пресет удалён")
@@ -860,16 +1157,16 @@ with tab_gen:
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        start_clicked = st.button("▶️ Запустить", use_container_width=True,
+        start_clicked = st.button("▶️ Запустить", width="stretch",
                                   disabled=running)
     with c2:
-        pause_clicked = st.button("⏸️ Пауза", use_container_width=True,
+        pause_clicked = st.button("⏸️ Пауза", width="stretch",
                                   disabled=not running or paused or has_review)
     with c3:
-        resume_clicked = st.button("⏵️ Возобновить", use_container_width=True,
+        resume_clicked = st.button("⏵️ Возобновить", width="stretch",
                                    disabled=not running or not paused)
     with c4:
-        stop_clicked = st.button("⏹️ Остановить", use_container_width=True,
+        stop_clicked = st.button("⏹️ Остановить", width="stretch",
                                  disabled=not running)
 
     if start_clicked:
