@@ -966,15 +966,24 @@ def render_review(task, preview_col, caption_col) -> None:
             st.image(task.image_path, width="stretch")
     with caption_col:
         st.markdown("**Сгенерированный капшен:**")
-        # Streamlit-виджет с key держит своё значение в session_state и ИГНОРИРУЕТ
-        # аргумент value при перерисовке. Поэтому после «Перегенерировать» (когда
-        # task.caption сменился) поле показывало бы старый текст. Синхронизируем
-        # состояние вручную — только когда сменился файл или сам капшен; при наборе
-        # правок task.caption не меняется, так что текст пользователя не затирается.
-        if ss.get("_review_loaded_for") != (task.name, task.caption):
-            ss["review_caption"] = task.caption
-            ss["_review_loaded_for"] = (task.name, task.caption)
-        edited = st.text_area("Капшен", height=220, key="review_caption")
+        # Streamlit-виджет с фиксированным key держит своё значение в session_state
+        # и ИГНОРИРУЕТ аргумент value при перерисовке — поэтому при переходе на новый
+        # файл (или после «Перегенерировать») поле показывало бы старый текст. Ручная
+        # синхронизация через session_state оказалась хрупкой: между файлами панель
+        # ревью ~10 мин не рисуется (has_review=False, пока генерится следующий), и
+        # Streamlit подчищает ключ review_caption как «исчезнувший виджет», рассинхронив
+        # его с guard-ключом. Поэтому — как в галерее (nonce в ключе): при смене
+        # (файл, капшен) наращиваем nonce, ключ становится новым → рождается свежий
+        # виджет, чей value=task.caption честно применяется. Пока пользователь правит
+        # текст, (файл, капшен) не меняется → ключ стабилен → правки не затираются.
+        ident = (task.name, task.caption)
+        if ss.get("_review_ident") != ident:
+            ss["_review_ident"] = ident
+            ss["_review_nonce"] = ss.get("_review_nonce", 0) + 1
+        edited = st.text_area(
+            "Капшен", task.caption, height=220,
+            key=f"review_caption_{ss.get('_review_nonce', 0)}",
+        )
         b1, b2, b3, b4 = st.columns(4)
         if b1.button("✅ Принять"):
             worker.submit_review("accept", edited)
