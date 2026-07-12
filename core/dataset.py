@@ -230,6 +230,131 @@ def sanitize_caption(
 
 
 # --------------------------------------------------------------------------- #
+# Предупреждения по капшену (inline-подсветка в редакторе галереи)
+# --------------------------------------------------------------------------- #
+def caption_warnings(caption: str, trigger: str = "") -> list[str]:
+    """Список предупреждений по капшену для UI."""
+    from collections import Counter as _Counter
+
+    from config import CAPTION_MAX_CHARS
+    from core.quality import evaluate_caption
+
+    warnings: list[str] = []
+    text = (caption or "").strip()
+
+    if not text:
+        warnings.append("Капшен пустой")
+        return warnings
+
+    if len(text) > CAPTION_MAX_CHARS:
+        warnings.append(f"Слишком длинный ({len(text)} > {CAPTION_MAX_CHARS} симв.)")
+
+    if trigger and trigger.strip():
+        first_line = text.split("\n", 1)[0]
+        if trigger.strip().lower() not in first_line.lower():
+            warnings.append(f"Нет триггера «{trigger.strip()}» в первой строке")
+
+    tags = extract_tags(text)
+    if tags:
+        counts = _Counter(t.lower() for t in tags)
+        dupes = [t for t, n in counts.items() if n > 1]
+        if dupes:
+            warnings.append(f"Дубли тегов: {', '.join(dupes[:5])}")
+
+    is_good, reason = evaluate_caption(text)
+    if not is_good:
+        warnings.append(f"Качество: {reason}")
+
+    return warnings
+
+
+# --------------------------------------------------------------------------- #
+# Мёрж старого и нового капшена (Фаза 5, «умное обновление»)
+# --------------------------------------------------------------------------- #
+# Наш формат строго секционный: сверху ТЕГ-секция (одна или несколько тег-строк,
+# возможно разделённых пустыми строками), ниже — ПРОЗА (COMPOSITION/CHARACTERS/
+# INTENT). Прозу нельзя слить автоматически (это семантика двух описаний),
+# поэтому теги и прозу мёржим РАЗДЕЛЬНО, каждую по своей стратегии.
+def split_sections(caption: str) -> tuple[str, str]:
+    """Разбить капшен на (тег-секция, проза-секция).
+
+    Проза начинается с ПЕРВОЙ прозаической строки (не тег и не пустая). Всё до
+    неё — теги, от неё до конца — проза. Если прозы нет вовсе — вторая часть
+    пустая; если капшен начинается сразу с прозы — пустая первая.
+    """
+    lines = caption.splitlines()
+    prose_start = None
+    for i, line in enumerate(lines):
+        if not line.strip():
+            continue  # пустые-разделители не начинают прозу
+        if not is_tag_line(line):
+            prose_start = i
+            break
+    if prose_start is None:
+        return caption.strip("\n"), ""
+    tag_part = "\n".join(lines[:prose_start]).strip("\n")
+    prose_part = "\n".join(lines[prose_start:]).strip("\n")
+    return tag_part, prose_part
+
+
+def _union_missing_tags(old_tags: str, new_tags: str) -> str:
+    """Добавить в тег-секцию old теги из new, которых там ещё нет (идемпотентно).
+
+    Порядок и структура old сохраняются, недостающие теги дописываются в первую
+    тег-строку через существующий add_tag_to_caption (та же логика, что в UI).
+    Сравнение регистронезависимое, поэтому повторный прогон не плодит дубли.
+    """
+    if not old_tags.strip():
+        return new_tags
+    have = {t for t in extract_tags(old_tags)}
+    result = old_tags
+    for tag in extract_tags(new_tags):
+        if tag not in have:
+            result = add_tag_to_caption(result, tag)
+            have.add(tag)
+    return result
+
+
+def merge_captions(
+    old: str,
+    new: str,
+    tag_strategy: str = "union",
+    prose_strategy: str = "keep_old",
+) -> str:
+    """Слить старый и новый капшен по раздельным стратегиям тегов и прозы.
+
+    tag_strategy:
+      "union"   — старые теги + недостающие из new (аддитивно, идемпотентно);
+      "replace" — взять тег-секцию из new;
+      "keep"    — оставить старые теги.
+    prose_strategy:
+      "keep_old" — сохранить старую прозу (защита ручных правок, unattended-дефолт);
+      "replace"  — взять прозу из new.
+    Возвращает собранный капшен «теги\\n\\nпроза». Пустые секции опускаются.
+    """
+    old_tags, old_prose = split_sections(old or "")
+    new_tags, new_prose = split_sections(new or "")
+
+    if tag_strategy == "replace":
+        tags = new_tags
+    elif tag_strategy == "keep":
+        tags = old_tags
+    else:  # union
+        tags = _union_missing_tags(old_tags, new_tags)
+
+    prose = new_prose if prose_strategy == "replace" else old_prose
+
+    parts = [p for p in (tags.strip("\n"), prose.strip("\n")) if p.strip()]
+    return "\n\n".join(parts)
+
+
+def caption_fingerprint(caption: str) -> str:
+    """Стабильная подпись содержимого капшена (для сравнения «изменилось ли»)."""
+    from core.registry import caption_signature  # низкоуровневый модуль, без циклов
+    return caption_signature(caption)
+
+
+# --------------------------------------------------------------------------- #
 # Триггер-слово (ретрофит по всему датасету)
 # --------------------------------------------------------------------------- #
 def apply_trigger(caption: str, trigger: str) -> str:

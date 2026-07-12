@@ -15,12 +15,13 @@ import config
 from core import app_settings
 from core import dataset as ds
 from core import health
+from core import op_history
 from core import presets as presets_mod
 from core.caption_client import CaptionClient
 from core.folder_dialog import pick_folder
-from core.image_scanner import ImageTask, build_task_list, find_images, scan_summary
+from core.image_scanner import ImageTask, UpdateTask, build_task_list, build_update_plan, find_images, scan_summary
 from core.logger import Logger
-from core.registry import DoneRegistry
+from core.registry import DoneRegistry, prompt_signature
 from core.worker import CaptionWorker
 
 st.set_page_config(page_title="Tag Manager", page_icon="🏷️", layout="wide")
@@ -69,6 +70,7 @@ def init_state() -> None:
     ss.manual_review = False    # проверять каждый капшен вручную перед записью
     ss.disable_thinking = config.DEFAULT_DISABLE_THINKING  # выключить размышления модели
     ss.trigger_word = config.DEFAULT_TRIGGER_WORD  # триггер стиля, подставляется первым тегом
+    ss.notify_on_finish = True  # браузерное уведомление по завершении
 
     # Накладываем сохранённые «липкие» настройки поверх дефолтов, чтобы не
     # переставлять галки/слайдеры при каждом запуске (settings.json).
@@ -88,6 +90,16 @@ def init_state() -> None:
     ss.folder = ""
     ss.recursive = False
     ss.mode = config.PROCESSING_MODES[0]
+
+    # Настройки обновления (Фаза 5)
+    ss.update_mechanism = config.DEFAULT_UPDATE_MECHANISM
+    ss.tag_strategy = config.DEFAULT_TAG_STRATEGY
+    ss.prose_strategy = config.DEFAULT_PROSE_STRATEGY
+    ss.manual_policy = config.DEFAULT_MANUAL_POLICY
+    ss.upd_filter_prompt = True
+    ss.upd_filter_model = False
+    ss.upd_filter_quality = False
+    ss.upd_filter_all = False
 
     # Промпты
     first_preset = next(iter(ss.presets))
@@ -124,7 +136,7 @@ def get_client() -> CaptionClient:
 
 def get_params() -> dict:
     """Снапшот параметров генерации для передачи в воркер."""
-    return {
+    params = {
         "system_prompt": ss.system_prompt,
         "user_prompt": ss.user_prompt,
         "temperature": ss.temperature,
@@ -135,6 +147,14 @@ def get_params() -> dict:
         "disable_thinking": ss.disable_thinking,
         "trigger_word": ss.trigger_word,
     }
+    if ss.get("mode") == config.MODE_UPDATE:
+        params.update({
+            "update_mechanism": ss.get("update_mechanism", config.DEFAULT_UPDATE_MECHANISM),
+            "tag_strategy": ss.get("tag_strategy", config.DEFAULT_TAG_STRATEGY),
+            "prose_strategy": ss.get("prose_strategy", config.DEFAULT_PROSE_STRATEGY),
+            "manual_policy": ss.get("manual_policy", config.DEFAULT_MANUAL_POLICY),
+        })
+    return params
 
 
 def get_registry() -> DoneRegistry:
@@ -168,6 +188,9 @@ def _tags_build_op(desc: tuple):
         return lambda t: ds.add_tag_to_caption(t, desc[1], desc[2])
     if kind == "del_tag":
         return lambda t: ds.remove_tag_from_caption(t, desc[1])
+    if kind == "stoplist":
+        from core.stoplist import apply_stoplist as _apply_sl
+        return lambda t: _apply_sl(t, desc[1])
     return lambda t: t
 
 
@@ -264,7 +287,8 @@ def render_tags_tab() -> None:
         mc[2].metric(".bak копий", summ["backups"])
 
     st.divider()
-    op_tabs = st.tabs(["🎯 Триггер", "🔁 Найти/заменить", "➕➖ Тег", "📊 Частоты"])
+    op_tabs = st.tabs(["🎯 Триггер", "🔁 Найти/заменить", "➕➖ Тег",
+                       "📊 Частоты", "📜 История"])
 
     with op_tabs[0]:
         trig = st.text_input("Триггер-слово", ss.trigger_word)
@@ -306,6 +330,18 @@ def render_tags_tab() -> None:
                    "«Схлопнуть пробелы» убирает двойные пробелы внутри тега. "
                    "Пустые фрагменты и лишние запятые убираются всегда.")
 
+        st.divider()
+        st.markdown("**Стоп-лист** — удалить нежелательные теги из всего датасета")
+        from core.stoplist import load_stoplist as _load_sl2
+        _sl = _load_sl2()
+        if _sl:
+            st.caption(f"Тегов в стоп-листе: {len(_sl)} (редактировать в сайдбаре)")
+            if st.button("Применить стоп-лист к датасету"):
+                _tags_stage(("stoplist", frozenset(_sl)),
+                            f"Стоп-лист ({len(_sl)} тегов)", files)
+        else:
+            st.caption("Стоп-лист пуст. Добавьте теги в сайдбаре → «Стоп-лист тегов».")
+
     with op_tabs[2]:
         ac = st.columns(2)
         with ac[0]:
@@ -336,6 +372,24 @@ def render_tags_tab() -> None:
             st.caption(f"Уникальных тегов: {len(counter)} · прочитано файлов: {read}")
             st.dataframe(rows, width="stretch", height=380)
 
+    with op_tabs[4]:
+        hist = op_history.load_history(ss.tags_folder) if ss.tags_folder else []
+        if not hist:
+            st.caption("История операций пуста.")
+        else:
+            st.caption("Откат работает по `.bak`. Если после операции был ещё один "
+                       "прогон — `.bak` перезаписан новым.")
+            for rec in reversed(hist[-10:]):
+                st.text(f"[{rec.ts}]  {rec.label}  ({len(rec.files)} файлов)")
+            if st.button("↩️ Откатить последнюю операцию", width="stretch"):
+                n_restored, lbl = op_history.rollback_last(ss.tags_folder)
+                if n_restored:
+                    st.toast(f"Откачено {n_restored} файлов: «{lbl}»")
+                    ss.tags_freq = None
+                    st.rerun()
+                else:
+                    st.warning("Нечего откатывать (нет .bak)")
+
     # --- общая staged-область: предпросмотр + применение ---
     pend = ss.tags_pending
     if pend:
@@ -362,6 +416,12 @@ def render_tags_tab() -> None:
                                      backup=ss.tags_backup)
             logger.info(f"Массовая правка «{pend['label']}»: изменено "
                         f"{res['changed']}/{res['total']}, ошибок {res['errors']}")
+            if res["changed"] > 0 and ss.tags_folder:
+                op_history.log_operation(
+                    ss.tags_folder,
+                    f"{pend['label']} → {res['changed']} файлов",
+                    files,
+                )
             st.toast(f"Изменено {res['changed']} файлов"
                      + (f", ошибок {res['errors']}" if res["errors"] else ""))
             ss.tags_pending = None
@@ -394,26 +454,46 @@ THUMB_PX = 200            # размер миниатюры (длинная ст
 
 @st.cache_data(show_spinner=False, max_entries=4096)
 def _thumbnail(path: str, mtime: float, size: int = THUMB_PX) -> bytes | None:
-    """Уменьшенное превью (PNG-байты), закэшированное по (path, mtime).
+    """Уменьшенное превью (PNG-байты), с дисковым кэшем в .thumbs/.
 
-    Ключ включает mtime → при замене картинки миниатюра пересоздаётся. Кеш
-    ограничен max_entries, чтобы память не росла на огромных датасетах. Грузим
-    и ужимаем ОДИН раз; сетка потом отдаёт готовые байты, не открывая оригинал.
+    Порядок: RAM-кэш (@st.cache_data) → дисковый кэш (.thumbs/*.png) → PIL.
+    Дисковый кэш переживает перезапуск приложения — повторный вход в галерею
+    мгновенный даже на сотнях картинок.
     """
     import io
 
     from PIL import Image
 
+    cache_dir = os.path.join(os.path.dirname(path), config.THUMBS_DIR)
+    stem = os.path.splitext(os.path.basename(path))[0]
+    cache_path = os.path.join(cache_dir, stem + ".png")
+
+    try:
+        if os.path.isfile(cache_path) and os.path.getmtime(cache_path) >= mtime:
+            with open(cache_path, "rb") as f:
+                return f.read()
+    except OSError:
+        pass
+
     try:
         im = Image.open(path)
-        im.draft("RGB", (size, size))   # ускоряет декод JPEG (грубее, но быстро)
+        im.draft("RGB", (size, size))
         im = im.convert("RGB")
         im.thumbnail((size, size))
         buf = io.BytesIO()
         im.save(buf, format="PNG")
-        return buf.getvalue()
-    except Exception:  # noqa: BLE001 — битый/непонятный файл не должен рушить сетку
+        data = buf.getvalue()
+    except Exception:
         return None
+
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        with open(cache_path, "wb") as f:
+            f.write(data)
+    except OSError:
+        pass
+
+    return data
 
 
 @st.cache_data(show_spinner=False, max_entries=8192)
@@ -514,6 +594,12 @@ def _gallery_editor(items: list[dict]) -> None:
         if busy:
             st.caption("⏳ Идёт генерация — сохранение и перегенерация временно "
                        "заблокированы.")
+
+        # Предупреждения по капшену
+        _warns = ds.caption_warnings(edited, ss.trigger_word)
+        for _w in _warns:
+            st.warning(_w)
+
         # Показ тегов чипами для наглядности.
         tags = ds.extract_tags(item["caption"])
         if tags:
@@ -534,7 +620,7 @@ def _gallery_multiaction(items: list[dict]) -> None:
     tag = ac[0].text_input("Тег для добавления/удаления", key="gal_ma_tag")
     trig = ac[1].text_input("Триггер", ss.trigger_word, key="gal_ma_trig")
 
-    b = st.columns(4)
+    b = st.columns(5)
     if b[0].button("➕ Добавить тег", disabled=not tag.strip(), width="stretch"):
         ss.gallery_pending = (("add_tag", tag, False), f"Добавить тег «{tag}»", sel_txt)
     if b[1].button("➖ Удалить тег", disabled=not tag.strip(), width="stretch"):
@@ -543,6 +629,16 @@ def _gallery_multiaction(items: list[dict]) -> None:
         ss.gallery_pending = (("trigger_add", trig), f"Добавить триггер «{trig}»", sel_txt)
     if b[3].button("🗑️ Удалить капшены", width="stretch"):
         ss.gallery_pending = (("delete", sel_imgs), "Удалить капшены выбранных", sel_txt)
+    _busy = worker.is_alive()
+    if b[4].button("🔄 Перегенерировать", width="stretch", disabled=_busy):
+        tasks = [ImageTask(image_path=it["image"], txt_path=it["txt"]) for it in sel]
+        params = {**get_params(), "manual_review": False}
+        worker.start(tasks, ss.gallery_folder, params, logger,
+                     get_registry(), get_client())
+        st.toast(f"Перегенерация {len(tasks)} файлов запущена…")
+        ss.gallery_pending = None
+        ss.gallery_selected = set()
+        st.rerun()
 
     pend = ss.gallery_pending
     if pend:
@@ -570,6 +666,8 @@ def _gallery_multiaction(items: list[dict]) -> None:
                 res = ds.apply_operation(target, _tags_build_op(desc), backup=True)
                 msg = f"Изменено {res['changed']} файлов"
             logger.info(f"Галерея, мультидействие «{label}»: {msg}")
+            if ss.gallery_folder:
+                op_history.log_operation(ss.gallery_folder, f"{label}: {msg}", target)
             st.toast(msg)
             # Обновляем капшены выбранных в памяти, чтобы сетка показала актуальное.
             for it in sel:
@@ -697,6 +795,17 @@ def render_gallery_tab() -> None:
             _gallery_multiaction(items)
 
 
+def _fmt_duration(seconds: float) -> str:
+    """Человекочитаемая длительность: '< 1 мин' / '~12 мин' / '~2 ч 5 мин'."""
+    if seconds < 60:
+        return "< 1 мин"
+    m = int(seconds) // 60
+    h = m // 60
+    if h == 0:
+        return f"~{m} мин"
+    return f"~{h} ч {m % 60} мин"
+
+
 # --------------------------------------------------------------------------- #
 # Sidebar — настройки
 # --------------------------------------------------------------------------- #
@@ -744,10 +853,36 @@ with st.sidebar:
              "серверу переключатели (enable_thinking=false, reasoning_budget=0) и "
              "текстовые маркеры для Qwen/Gemma. Модель без thinking просто игнорирует.",
     )
+    ss.notify_on_finish = st.checkbox(
+        "Уведомлять о завершении",
+        value=ss.notify_on_finish,
+        help="Браузерное уведомление (Web Notification) когда прогон завершён. "
+             "Удобно, если ушли от вкладки на время обработки.",
+    )
 
     # Автосохранение «липких» настроек: любое изменение полей выше пишем в
     # settings.json, чтобы при следующем запуске они восстановились сами.
     app_settings.save_settings({k: ss[k] for k in app_settings.PERSISTED_KEYS if k in ss})
+
+    with st.expander("Стоп-лист тегов"):
+        from core.stoplist import load_stoplist as _load_sl, save_stoplist as _save_sl
+        _sl_path = config.STOPLIST_FILE
+        _sl_current = ""
+        if os.path.isfile(_sl_path):
+            try:
+                with open(_sl_path, encoding="utf-8") as _f:
+                    _sl_current = _f.read()
+            except OSError:
+                pass
+        _sl_edited = st.text_area(
+            "Один тег на строку, # = комментарий",
+            _sl_current, height=120, key="stoplist_edit",
+        )
+        _sl_tags = _load_sl(_sl_path)
+        st.caption(f"Тегов в стоп-листе: {len(_sl_tags)}")
+        if st.button("Сохранить стоп-лист", width="stretch"):
+            _save_sl(_sl_edited, _sl_path)
+            st.toast("Стоп-лист сохранён")
 
     if st.button("🔌 Проверить соединение", width="stretch"):
         ok, msg = get_client().check_connection()
@@ -772,6 +907,28 @@ with st.sidebar:
                  disabled=worker.is_alive()):
         proc.clear_progress()
         st.info("Файл прогресса удалён")
+
+    st.divider()
+    with st.expander("📥 Экспорт конфига для тренера"):
+        from core.export import export_kohya_toml, export_onetrainer
+        _exp_fmt = st.selectbox("Формат", ["OneTrainer (JSON)", "kohya (TOML)"],
+                                key="export_fmt")
+        _exp_rep = st.number_input("Repeats", 1, 100, 10, key="export_rep")
+        _exp_res = st.number_input("Resolution", 256, 2048, 512, 64,
+                                   key="export_res")
+        if ss.folder and os.path.isdir(ss.folder):
+            if "OneTrainer" in _exp_fmt:
+                _data = export_onetrainer(ss.folder, ss.trigger_word,
+                                          _exp_rep, _exp_res)
+                _fname = "dataset.json"
+            else:
+                _data = export_kohya_toml(ss.folder, ss.trigger_word,
+                                          _exp_rep, _exp_res)
+                _fname = "dataset.toml"
+            st.download_button("📥 Скачать конфиг", _data, _fname,
+                               width="stretch")
+        else:
+            st.caption("Укажите папку на вкладке «Генерация».")
 
 
 # --------------------------------------------------------------------------- #
@@ -1075,8 +1232,53 @@ with tab_gen:
     with col_m1:
         ss.recursive = st.checkbox("Рекурсивно (включая подпапки)", ss.recursive)
     with col_m2:
-        ss.mode = st.selectbox("Режим обработки", config.PROCESSING_MODES,
-                               index=config.PROCESSING_MODES.index(ss.mode))
+        st.selectbox("Режим обработки", config.UI_MODES, key="mode")
+
+    # --- Настройки обновления (только для MODE_UPDATE) ---
+    if ss.mode == config.MODE_UPDATE:
+        with st.expander("⚙️ Настройки обновления", expanded=True):
+            uc1, uc2 = st.columns(2)
+            with uc1:
+                ss.update_mechanism = st.selectbox(
+                    "Механизм", config.UPDATE_MECHANISMS,
+                    index=config.UPDATE_MECHANISMS.index(
+                        ss.get("update_mechanism", config.DEFAULT_UPDATE_MECHANISM)),
+                    help="«Дополнить» — модель видит старый капшен и дописывает "
+                         "недостающее (дешевле). «Полная регенерация» — генерит "
+                         "с нуля, потом мёржит по стратегии.",
+                )
+                ss.tag_strategy = st.selectbox(
+                    "Теги", config.TAG_STRATEGIES,
+                    index=config.TAG_STRATEGIES.index(
+                        ss.get("tag_strategy", config.DEFAULT_TAG_STRATEGY)),
+                )
+            with uc2:
+                ss.prose_strategy = st.selectbox(
+                    "Проза", config.PROSE_STRATEGIES,
+                    index=config.PROSE_STRATEGIES.index(
+                        ss.get("prose_strategy", config.DEFAULT_PROSE_STRATEGY)),
+                )
+                ss.manual_policy = st.selectbox(
+                    "Ручные правки", config.MANUAL_POLICIES,
+                    index=config.MANUAL_POLICIES.index(
+                        ss.get("manual_policy", config.DEFAULT_MANUAL_POLICY)),
+                    help="Что делать с капшенами, которые редактировал "
+                         "человек после генерации.",
+                )
+            st.markdown("**Фильтры — какие файлы обновлять:**")
+            fc1, fc2, fc3, fc4 = st.columns(4)
+            with fc1:
+                ss.upd_filter_prompt = st.checkbox("Устаревший промпт",
+                                                   ss.get("upd_filter_prompt", True))
+            with fc2:
+                ss.upd_filter_model = st.checkbox("Сменилась модель",
+                                                  ss.get("upd_filter_model", False))
+            with fc3:
+                ss.upd_filter_quality = st.checkbox("Плохое качество",
+                                                    ss.get("upd_filter_quality", False))
+            with fc4:
+                ss.upd_filter_all = st.checkbox("Все файлы",
+                                                ss.get("upd_filter_all", False))
 
     if st.button("🔍 Сканировать"):
         if os.path.isdir(ss.folder):
@@ -1170,8 +1372,33 @@ with tab_gen:
                                  disabled=not running)
 
     if start_clicked:
+        ss._notified = False
         if not os.path.isdir(ss.folder):
             st.error("Укажите существующую папку")
+        elif ss.mode == config.MODE_UPDATE:
+            registry = get_registry()
+            cur_hash = prompt_signature(ss.system_prompt, ss.user_prompt)
+            filters = {
+                "prompt_changed": ss.get("upd_filter_prompt", True),
+                "model_changed": ss.get("upd_filter_model", False),
+                "quality": ss.get("upd_filter_quality", False),
+                "all": ss.get("upd_filter_all", False),
+            }
+            update_tasks = build_update_plan(
+                ss.folder, ss.recursive, registry,
+                current_prompt_hash=cur_hash,
+                current_model=ss.model,
+                filters=filters,
+            )
+            if not update_tasks:
+                st.warning("Нет файлов для обновления по выбранным фильтрам")
+            else:
+                manual_count = sum(1 for t in update_tasks if t.manually_edited)
+                logger.info(f"Старт обновления: {len(update_tasks)} файлов "
+                            f"(из них ручных правок: {manual_count})")
+                worker.start_update(update_tasks, ss.folder, get_params(),
+                                    logger, registry, get_client())
+                st.rerun()
         else:
             tasks = build_task_list(ss.folder, ss.recursive, ss.mode, get_registry())
             if not tasks:
@@ -1197,14 +1424,35 @@ with tab_gen:
     # --- Прогресс и статистика ---
     # clamp в [0,1]: при рассинхроне сохранённого прогресса (index > len(tasks))
     # отношение может выйти за 1.0 и уронить st.progress — не даём этому случиться.
-    _ratio = snap["done"] / snap["total"] if snap["total"] else 0.0
-    st.progress(min(1.0, max(0.0, _ratio)))
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Всего", snap["total"])
-    m2.metric("Обработано", snap["processed"])
-    m3.metric("Пропущено", snap["skipped"])
-    m4.metric("Ошибок", snap["errors"])
-    m5.metric("Готово", f"{snap['done']}/{snap['total']}")
+    if snap["update_total"] > 0:
+        _ratio = snap["update_done"] / snap["update_total"]
+        st.progress(min(1.0, max(0.0, _ratio)))
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Всего", snap["update_total"])
+        m2.metric("Обновлено", snap["update_done"] - snap["update_skipped"] - snap["update_errors"])
+        m3.metric("Пропущено", snap["update_skipped"])
+        m4.metric("Ошибок", snap["update_errors"])
+    else:
+        _ratio = snap["done"] / snap["total"] if snap["total"] else 0.0
+        st.progress(min(1.0, max(0.0, _ratio)))
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Всего", snap["total"])
+        m2.metric("Обработано", snap["processed"])
+        m3.metric("Пропущено", snap["skipped"])
+        m4.metric("Ошибок", snap["errors"])
+        m5.metric("Готово", f"{snap['done']}/{snap['total']}")
+
+    # ETA и скорость
+    _done_n = snap["update_done"] if snap["update_total"] > 0 else snap["done"]
+    _total_n = snap["update_total"] if snap["update_total"] > 0 else snap["total"]
+    _elapsed = time.time() - snap["start_ts"] if snap["start_ts"] else 0.0
+    if running and _done_n > 0 and _elapsed > 5:
+        _avg = _elapsed / _done_n
+        _remaining = (_total_n - _done_n) * _avg
+        ec = st.columns(3)
+        ec[0].metric("Скорость", f"{_avg:.0f} с/файл")
+        ec[1].metric("Прошло", _fmt_duration(_elapsed))
+        ec[2].metric("Осталось", _fmt_duration(_remaining))
 
     status_placeholder = st.empty()
     preview_col, caption_col = st.columns(2)
@@ -1222,6 +1470,47 @@ with tab_gen:
         _poll = True
     elif snap["finished"]:
         status_placeholder.success(snap["status_msg"] or "✅ Обработка завершена")
+        if ss.get("notify_on_finish") and not ss.get("_notified"):
+            import streamlit.components.v1 as stc
+            stc.html(
+                '<script>'
+                'if(Notification.permission==="granted")'
+                '  new Notification("Tag Manager",{body:"Обработка завершена!"});'
+                'else if(Notification.permission!=="denied")'
+                '  Notification.requestPermission();'
+                '</script>',
+                height=0,
+            )
+            ss._notified = True
+        # Диффы обновления
+        _diffs = snap.get("update_diffs", [])
+        if _diffs:
+            with st.expander(f"📝 Что изменилось ({len(_diffs)} файлов)"):
+                for _dn, _old, _new in _diffs[:30]:
+                    st.markdown(f"**{_dn}**")
+                    _dc = st.columns(2)
+                    _dc[0].text_area("до", _old, height=120, disabled=True,
+                                     key=f"diff_old_{_dn}")
+                    _dc[1].text_area("после", _new, height=120, disabled=True,
+                                     key=f"diff_new_{_dn}")
+        # Отложенные на ручной просмотр (политика «Отложить»). Показываем список,
+        # иначе выбор этой политики был бы невидим — файлы копятся в скрытом JSON.
+        if snap.get("update_deferred", 0) and ss.folder:
+            _rev_path = os.path.join(ss.folder, config.DEFERRED_REVIEW_FILE)
+            _deferred: list[str] = []
+            if os.path.isfile(_rev_path):
+                try:
+                    import json as _json
+                    with open(_rev_path, encoding="utf-8") as _rf:
+                        _deferred = _json.load(_rf)
+                except (OSError, ValueError):
+                    _deferred = []
+            with st.expander(f"🔎 Отложено на ручной просмотр ({len(_deferred)})"):
+                st.caption("Эти капшены правил человек — обновление их не трогало. "
+                           "Проверьте вручную (список в "
+                           f"`{config.DEFERRED_REVIEW_FILE}`).")
+                for _dp in _deferred[:100]:
+                    st.text(os.path.basename(_dp))
     else:
         status_placeholder.write(snap["status_msg"] or "Готов к запуску.")
 

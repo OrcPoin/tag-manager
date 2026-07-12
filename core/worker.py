@@ -14,15 +14,18 @@
 
 from __future__ import annotations
 
+import os
 import threading
+import time
 from typing import Callable
 
 from core.caption_client import CaptionClient
-from core.dataset import apply_trigger
-from core.image_scanner import ImageTask
+from core.dataset import apply_trigger, merge_captions
+from core.image_scanner import ImageTask, UpdateTask
 from core.logger import Logger
-from core.registry import DoneRegistry
+from core.registry import DoneRegistry, prompt_signature, caption_signature
 from core.state import ProcessingState
+from core.stoplist import apply_stoplist, load_stoplist
 
 
 def _write_caption(txt_path: str, caption: str, trigger: str = "") -> None:
@@ -64,6 +67,23 @@ class CaptionWorker:
         self.review_task: ImageTask | None = None
         self._review_decision: tuple[str, str] | None = None
 
+        # Обновление (Фаза 5).
+        self._update_tasks: list[UpdateTask] = []
+        self._update_total = 0
+        self._update_done = 0
+        self._update_skipped = 0
+        self._update_errors = 0
+        self._update_deferred = 0  # отложено на ручной просмотр (MANUAL_DEFER)
+
+        # Диффы изменений при обновлении (для UI).
+        self._update_diffs: list[tuple[str, str, str]] = []
+
+        # Таймстемп старта (для расчёта ETA).
+        self._start_ts: float = 0.0
+
+        # Стоп-лист тегов (загружается при start).
+        self._stoplist: set[str] = set()
+
     # ------------------------------------------------------------------ #
     # Управление (вызывается из главного потока UI)
     # ------------------------------------------------------------------ #
@@ -88,6 +108,7 @@ class CaptionWorker:
         self._stop_event.clear()
         self._pause_event.clear()
         self._review_event.clear()
+        self._stoplist = load_stoplist()
         with self._lock:
             self.running = True
             self.paused = False
@@ -96,6 +117,7 @@ class CaptionWorker:
             self._review_decision = None
             self.status_msg = "Запуск…"
             self.current_name = ""
+            self._start_ts = time.time()
 
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -118,6 +140,7 @@ class CaptionWorker:
         self._stop_event.clear()
         self._pause_event.clear()
         self._review_event.clear()
+        self._stoplist = load_stoplist()
         with self._lock:
             self.running = True
             self.paused = False
@@ -126,6 +149,7 @@ class CaptionWorker:
             self._review_decision = None
             self.status_msg = "Продолжаю…"
             self.current_name = ""
+            self._start_ts = time.time()
 
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -196,6 +220,13 @@ class CaptionWorker:
                 "processed": self.state.processed,
                 "skipped": self.state.skipped,
                 "errors": self.state.errors,
+                "update_total": self._update_total,
+                "update_done": self._update_done,
+                "update_skipped": self._update_skipped,
+                "update_errors": self._update_errors,
+                "update_deferred": self._update_deferred,
+                "update_diffs": list(self._update_diffs),
+                "start_ts": self._start_ts,
             }
 
     # ------------------------------------------------------------------ #
@@ -291,8 +322,17 @@ class CaptionWorker:
 
     def _commit(self, task: ImageTask, caption: str, result) -> None:
         """Записать капшен, отметить в реестре, продвинуть очередь."""
+        if self._stoplist:
+            caption = apply_stoplist(caption, self._stoplist)
+        final = apply_trigger(caption, self._params.get("trigger_word", ""))
         _write_caption(task.txt_path, caption, self._params.get("trigger_word", ""))
-        self._registry.mark_done(task.image_path)
+        p = self._params
+        self._registry.mark_done(
+            task.image_path,
+            prompt_hash=prompt_signature(p.get("system_prompt", ""), p.get("user_prompt", "")),
+            model=self._client.model if self._client else None,
+            caption=final.strip(),
+        )
         task.caption = caption
         task.status = "done"
         self.state.processed += 1
@@ -349,8 +389,17 @@ class CaptionWorker:
         # Триггер подставляется идемпотентно: если пользователь уже вписал его в
         # правке вручную — повторно не добавится.
         caption = edited if edited.strip() else task.caption
+        if self._stoplist:
+            caption = apply_stoplist(caption, self._stoplist)
+        final = apply_trigger(caption, self._params.get("trigger_word", ""))
         _write_caption(task.txt_path, caption, self._params.get("trigger_word", ""))
-        self._registry.mark_done(task.image_path)
+        p = self._params
+        self._registry.mark_done(
+            task.image_path,
+            prompt_hash=prompt_signature(p.get("system_prompt", ""), p.get("user_prompt", "")),
+            model=self._client.model if self._client else None,
+            caption=final.strip(),
+        )
         task.caption = caption
         task.status = "done"
         self.state.processed += 1
@@ -358,3 +407,245 @@ class CaptionWorker:
         self.state.advance()
         self.state.save_progress()
         return False
+
+    # ================================================================== #
+    # Режим обновления (Фаза 5)
+    # ================================================================== #
+    def start_update(
+        self,
+        tasks: list[UpdateTask],
+        folder: str,
+        params: dict,
+        logger: Logger,
+        registry: DoneRegistry,
+        client: CaptionClient,
+    ) -> None:
+        """Запустить обновление существующих капшенов в фоновом потоке."""
+        if self.is_alive():
+            return
+        self._update_tasks = tasks
+        self._params = dict(params)
+        self._logger = logger
+        self._registry = registry
+        self._client = client
+
+        self._stop_event.clear()
+        self._pause_event.clear()
+        self._review_event.clear()
+        self._stoplist = load_stoplist()
+        with self._lock:
+            self.running = True
+            self.paused = False
+            self.finished = False
+            self.review_task = None
+            self._review_decision = None
+            self.status_msg = "Обновление…"
+            self.current_name = ""
+            self._update_total = len(tasks)
+            self._update_done = 0
+            self._update_skipped = 0
+            self._update_errors = 0
+            self._update_deferred = 0
+            self._update_diffs = []
+            self._start_ts = time.time()
+
+        self._thread = threading.Thread(target=self._run_update, daemon=True)
+        self._thread.start()
+
+    def _run_update(self) -> None:
+        import json
+        import shutil
+        from config import (
+            AUGMENT_INSTRUCTION,
+            DEFERRED_REVIEW_FILE,
+            MANUAL_DEFER,
+            MANUAL_OVERWRITE,
+            MANUAL_PROTECT,
+            MANUAL_TAGS_ONLY,
+            TAG_STRATEGY_KEEP,
+            TAG_STRATEGY_REPLACE,
+            TAG_STRATEGY_UNION,
+            PROSE_STRATEGY_REPLACE,
+            UPDATE_MECH_AUGMENT,
+        )
+        from core.dataset import caption_fingerprint
+
+        p = self._params
+        mechanism = p.get("update_mechanism", UPDATE_MECH_AUGMENT)
+        tag_strategy_cfg = p.get("tag_strategy", TAG_STRATEGY_UNION)
+        prose_strategy_cfg = p.get("prose_strategy", "keep_old")
+        manual_policy = p.get("manual_policy", MANUAL_PROTECT)
+        trigger = p.get("trigger_word", "")
+        deferred: list[str] = []
+
+        tag_map = {
+            TAG_STRATEGY_UNION: "union",
+            TAG_STRATEGY_REPLACE: "replace",
+            TAG_STRATEGY_KEEP: "keep",
+        }
+        prose_map = {
+            PROSE_STRATEGY_REPLACE: "replace",
+        }
+        tag_strat = tag_map.get(tag_strategy_cfg, "union")
+        prose_strat = prose_map.get(prose_strategy_cfg, "keep_old")
+
+        cur_prompt_hash = prompt_signature(p.get("system_prompt", ""), p.get("user_prompt", ""))
+
+        try:
+            for i, task in enumerate(self._update_tasks):
+                if self._stop_event.is_set():
+                    break
+                if self._pause_event.is_set():
+                    if self._wait_while_paused():
+                        break
+                    continue
+
+                self._set_status(
+                    f"Обновление {i + 1} из {self._update_total}: {task.name}",
+                    current_name=task.name,
+                )
+
+                # Политика ручных правок
+                if task.manually_edited:
+                    if manual_policy == MANUAL_PROTECT:
+                        task.status = "skipped"
+                        self._update_skipped += 1
+                        self._log(f"[{task.name}] пропущен (ручные правки, защита)")
+                        with self._lock:
+                            self._update_done += 1
+                        continue
+                    elif manual_policy == MANUAL_DEFER:
+                        deferred.append(task.txt_path)
+                        task.status = "skipped"
+                        self._update_skipped += 1
+                        self._update_deferred += 1
+                        self._log(f"[{task.name}] отложен на ручной просмотр")
+                        with self._lock:
+                            self._update_done += 1
+                        continue
+                    elif manual_policy == MANUAL_TAGS_ONLY:
+                        tag_strat_eff = "union"
+                        prose_strat_eff = "keep_old"
+                    else:  # MANUAL_OVERWRITE
+                        tag_strat_eff = tag_strat
+                        prose_strat_eff = prose_strat
+                else:
+                    tag_strat_eff = tag_strat
+                    prose_strat_eff = prose_strat
+
+                # Генерация
+                if mechanism == UPDATE_MECH_AUGMENT:
+                    user_prompt = p["user_prompt"] + AUGMENT_INSTRUCTION.format(
+                        existing=task.existing_caption.strip()
+                    )
+                else:
+                    user_prompt = p["user_prompt"]
+
+                def on_attempt(n, msg, _name=task.name):
+                    self._log(f"[{_name}] попытка {n}: {msg}")
+
+                result = self._client.generate_caption(
+                    image_path=task.image_path,
+                    system_prompt=p["system_prompt"],
+                    user_prompt=user_prompt,
+                    temperature=p["temperature"],
+                    max_tokens=p["max_tokens"],
+                    top_p=p["top_p"],
+                    on_attempt=on_attempt,
+                    max_caption_retries=None if p.get("auto_retry") else 1,
+                    should_stop=lambda: self._stop_event.is_set() or self._pause_event.is_set(),
+                    disable_thinking=p.get("disable_thinking", False),
+                )
+
+                if result.stopped:
+                    if self._stop_event.is_set():
+                        break
+                    continue
+
+                if not result.success:
+                    task.status = "error"
+                    task.error = result.error
+                    self._update_errors += 1
+                    self._log(f"[{task.name}] ошибка: {result.error}", "error")
+                    with self._lock:
+                        self._update_done += 1
+                    continue
+
+                new_raw = result.caption
+
+                # Мёрж старого и нового по выбранным стратегиям. Для augment
+                # модель уже возвращает почти-готовый текст, но всё равно гоняем
+                # через merge_captions — гарантирует применение стратегий тегов/
+                # прозы и защиту ручных правок (tags_only/keep_old) единообразно.
+                merged = merge_captions(task.existing_caption, new_raw,
+                                        tag_strategy=tag_strat_eff,
+                                        prose_strategy=prose_strat_eff)
+
+                if self._stoplist:
+                    merged = apply_stoplist(merged, self._stoplist)
+
+                final = apply_trigger(merged, trigger).strip() + "\n"
+
+                # Идемпотентность: не трогать файл, если ничего не изменилось
+                if caption_fingerprint(final.strip()) == caption_fingerprint(task.existing_caption.strip()):
+                    task.status = "done"
+                    self._log(f"[{task.name}] без изменений (идемпотентно)")
+                    with self._lock:
+                        self._update_done += 1
+                    continue
+
+                # .bak перед записью
+                try:
+                    shutil.copy2(task.txt_path, task.txt_path + ".bak")
+                except OSError:
+                    pass
+
+                with open(task.txt_path, "w", encoding="utf-8") as f:
+                    f.write(final)
+
+                self._registry.mark_done(
+                    task.image_path,
+                    prompt_hash=cur_prompt_hash,
+                    model=self._client.model if self._client else None,
+                    caption=final.strip(),
+                )
+
+                task.caption = final.strip()
+                task.status = "done"
+                with self._lock:
+                    self._update_done += 1
+                    if len(self._update_diffs) < 50:
+                        self._update_diffs.append(
+                            (task.name, task.existing_caption.strip(), final.strip()))
+                self._log(f"[{task.name}] обновлён ({task.reason})")
+
+            # Сохраняем отложенные на ревью
+            if deferred:
+                folder = self._registry.folder if self._registry else ""
+                review_path = os.path.join(folder, DEFERRED_REVIEW_FILE) if folder else ""
+                if review_path:
+                    try:
+                        existing_deferred = []
+                        if os.path.isfile(review_path):
+                            with open(review_path, encoding="utf-8") as f:
+                                existing_deferred = json.load(f)
+                        merged_deferred = list(dict.fromkeys(existing_deferred + deferred))
+                        with open(review_path, "w", encoding="utf-8") as f:
+                            json.dump(merged_deferred, f, ensure_ascii=False, indent=2)
+                    except OSError:
+                        pass
+
+            if not self._stop_event.is_set():
+                self._set_status("✅ Обновление завершено")
+                self._log(f"Обновление завершено: {self._update_done} файлов, "
+                          f"пропущено {self._update_skipped}, ошибок {self._update_errors}")
+                with self._lock:
+                    self.finished = True
+
+        except Exception as exc:
+            self._log(f"Сбой воркера (обновление): {exc}", "error")
+            self._set_status(f"Сбой: {exc}")
+        finally:
+            with self._lock:
+                self.running = False
+                self.paused = False

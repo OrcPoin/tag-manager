@@ -26,6 +26,7 @@ PERSISTED_KEYS = (
     "manual_review",
     "disable_thinking",
     "trigger_word",
+    "notify_on_finish",
 )
 
 

@@ -48,10 +48,15 @@ Runs fully locally. All you need is your own vision model behind an OpenAI-compa
 
 - Caption generation via a local VLM (OpenAI-compatible API)
 - Hybrid format: booru tags + natural-language description
+- Safe update of existing captions (augment / full regen + merge, manual edit protection)
 - Bulk tag editing and cleanup (duplicates, spaces, case) — with preview and a `.bak` backup
+- Tag stoplist: auto-removal of unwanted tags during generation and bulk apply to dataset
 - Trigger word across the whole dataset at once
-- Gallery with tag search, manual edit and delete
+- Gallery with tag search, manual edit, batch re-caption of selected images and delete
 - Dataset audit before training: broken files, duplicates, orphans, weak captions
+- Operation history with one-click rollback of the last bulk action
+- Trainer config export (OneTrainer JSON / kohya TOML)
+- ETA and generation speed display, browser notification on completion
 - Pause and resume on long runs
 
 ## Why not WD14
@@ -122,18 +127,129 @@ untouched.
 
 ## FAQ
 
-**Generation takes 8–10 minutes — is that normal?**
+<details>
+<summary>How do I start a server with a vision model?</summary>
+
+Tag Manager doesn't launch the model itself — it connects to a running server with an
+OpenAI-compatible API. Two common options:
+
+**llama.cpp (llama-server)**
+
+A single binary, minimal setup. Download
+[llama.cpp](https://github.com/ggerganov/llama.cpp/releases) and a GGUF model file
+(e.g. Qwen2.5-VL, LLaVA), then:
+
+```bash
+llama-server -m model.gguf --port 5000 -ngl 99
+```
+
+In Tag Manager set the API address to `http://127.0.0.1:5000/v1`.
+
+**oobabooga (text-generation-webui)**
+
+A full UI with model management. Install per the
+[instructions](https://github.com/oobabooga/text-generation-webui#how-to-install), load
+a multimodal model on the *Model* tab, enable the API on the *Session* tab (API → OpenAI).
+
+In Tag Manager set the API address to `http://127.0.0.1:5000/v1` (oobabooga's default port).
+
+A plain text model won't work — it will ignore the image. You need a multimodal (vision)
+model.
+
+</details>
+
+<details>
+<summary>What processing modes are available?</summary>
+
+The “Processing mode” dropdown on the generation tab:
+
+- **Resume** — skip what this app has already done (tracked by its registry). Foreign
+  `.txt` files are not counted as “done”.
+- **All files** — overwrite everything.
+- **Only missing** — process images that have no `.txt` at all.
+- **Skip by date** — skip if the `.txt` is newer than the image.
+- **Update existing** — smart re-run on existing captions, see next question.
+
+</details>
+
+<details>
+<summary>How does “Update existing” mode work?</summary>
+
+A mode for refining already-done captions without losing manual edits. Safe to run
+repeatedly — if nothing changed, files won't be rewritten.
+
+**Mechanism** — how to produce the new text:
+
+- *Augment existing* — the model sees the image AND the old caption, replies only with
+  what's missing/wrong. Faster and cheaper, good for adding tags.
+- *Full regen + merge* — the model generates a caption from scratch, then the app merges
+  old and new per the strategies below.
+
+**Tag strategy** — what to do with the tag line:
+
+- *Add missing tags* — tags from the new caption that don't exist in the old one are
+  appended. No duplicates.
+- *Replace tags with new* — tag line is taken entirely from the new caption.
+- *Keep old tags* — tags are not touched.
+
+**Prose strategy** — what to do with the descriptive blocks (COMPOSITION / CHARACTERS etc.):
+
+- *Keep old prose* — prose stays as is (safe default).
+- *Take new prose* — prose is replaced from the new caption.
+
+**Manual edit policy** — if you edited the `.txt` by hand after generation:
+
+- *Don't touch* — file is skipped entirely (default).
+- *Only add tags* — append missing tags, don't change prose.
+- *Defer for review* — file is added to a list for manual inspection.
+- *Update normally* — edits are not protected.
+
+**Filters** — which files are included in the update:
+
+- *Prompt changed* — caption was made with a different prompt than current.
+- *Model changed* — caption was made with a different model.
+- *Poor quality* — caption fails the quality check.
+- *All files* — update everything that has a `.txt`.
+
+A `.bak` is created next to each file before writing.
+
+</details>
+
+<details>
+<summary>Generation takes 8–10 minutes — is that normal?</summary>
+
 For thinking models on complex scenes — yes. The timeout and `Max tokens` in `config.py`
 are set generously so a long but correct analysis doesn't get cut off. Simple images are
 faster.
 
-**I broke tags with a bulk edit. How do I undo?**
-Before every such operation a `.bak` is created next to the file. The “Tags” tab has an
-undo button that restores the `.txt` from the backup.
+</details>
 
-**Where are settings and presets stored?**
+<details>
+<summary>I broke tags with a bulk edit. How do I undo?</summary>
+
+Before every bulk operation a `.bak` is created next to the file. The “Tags” tab →
+“History” sub-tab lists recent operations and has a “Rollback last” button that restores
+`.txt` from backup. If another run happened after the operation, the `.bak` is overwritten
+and rollback is no longer possible.
+
+</details>
+
+<details>
+<summary>What is the tag stoplist?</summary>
+
+A `stoplist.txt` file (one tag per line, `#` = comment). Tags from the stoplist are
+automatically removed from every caption during generation. You can also apply the stoplist
+to an existing dataset in bulk (Tags tab). Edit it in the sidebar.
+
+</details>
+
+<details>
+<summary>Where are settings and presets stored?</summary>
+
 In the app folder: `settings.json`, `presets.json`, log in `processing_log.txt`. All
 local, never committed.
+
+</details>
 
 ## License
 

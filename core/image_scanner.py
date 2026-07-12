@@ -13,6 +13,7 @@ from config import (
     MODE_SKIP_PROCESSED,
     SUPPORTED_EXTENSIONS,
 )
+from core.quality import evaluate_caption
 from core.registry import DoneRegistry
 
 
@@ -119,3 +120,86 @@ def scan_summary(folder: str, recursive: bool) -> dict:
         "with_caption": with_caption,
         "missing": len(images) - with_caption,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Обновление существующих капшенов (Фаза 5)
+# --------------------------------------------------------------------------- #
+@dataclass
+class UpdateTask:
+    """Единица работы для режима обновления: картинка + её ТЕКУЩИЙ капшен."""
+
+    image_path: str
+    txt_path: str
+    existing_caption: str = ""
+    reason: str = "all"
+    manually_edited: bool = False
+    status: str = "pending"
+    caption: str = ""
+    error: str = ""
+
+    @property
+    def name(self) -> str:
+        return os.path.basename(self.image_path)
+
+
+def build_update_plan(
+    folder: str,
+    recursive: bool,
+    registry: DoneRegistry,
+    *,
+    current_prompt_hash: str,
+    current_model: str,
+    filters: dict,
+) -> list[UpdateTask]:
+    """Сформировать план обновления: какие капшены нужно доработать и почему.
+
+    filters — словарь bool-флагов:
+      prompt_changed — промпт изменился с момента генерации;
+      model_changed  — модель сменилась;
+      quality        — текущий капшен не прошёл проверку качества;
+      all            — включить все файлы с капшеном (полный перепрогон).
+    Картинки БЕЗ .txt пропускаются (обновлять нечего — для них есть обычные режимы).
+    """
+    include_all = filters.get("all", False)
+    check_prompt = filters.get("prompt_changed", False)
+    check_model = filters.get("model_changed", False)
+    check_quality = filters.get("quality", False)
+
+    tasks: list[UpdateTask] = []
+    for image_path in find_images(folder, recursive):
+        txt_path = _txt_path_for(image_path)
+        if not _has_valid_caption(txt_path):
+            continue
+
+        try:
+            existing = open(txt_path, encoding="utf-8").read()
+        except OSError:
+            continue
+
+        reason_parts: list[str] = []
+        if include_all:
+            reason_parts.append("all")
+        else:
+            if check_prompt and registry.prompt_changed(image_path, current_prompt_hash):
+                reason_parts.append("prompt_changed")
+            if check_model and registry.model_changed(image_path, current_model):
+                reason_parts.append("model_changed")
+            if check_quality:
+                is_good, _ = evaluate_caption(existing)
+                if not is_good:
+                    reason_parts.append("quality")
+
+        if not reason_parts:
+            continue
+
+        manually_edited = registry.was_edited_by_hand(image_path, existing)
+        tasks.append(UpdateTask(
+            image_path=image_path,
+            txt_path=txt_path,
+            existing_caption=existing,
+            reason="+".join(reason_parts),
+            manually_edited=manually_edited,
+        ))
+
+    return tasks

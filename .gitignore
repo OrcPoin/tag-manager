@@ -20,6 +20,8 @@ processing_log.txt
 settings.json
 # presets.json — пользовательские пресеты; пример см. presets.example.json
 presets.json
+# stoplist.txt — личный стоп-лист тегов (создаётся в корне при сохранении в UI)
+stoplist.txt
 
 # --- Датасеты / выходные .txt рядом с картинками ---
 *.jpg
