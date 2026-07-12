@@ -563,9 +563,10 @@ def _gallery_editor(items: list[dict]) -> None:
         if os.path.exists(item["image"]):
             st.image(item["image"], width="stretch")
     with edit_col:
-        # Ключ привязан к пути — при переходе на другое фото text_area
-        # пересоздаётся с капшеном нового файла (а не держит старый текст).
-        key = f"gal_edit_{item['image']}"
+        # Ключ привязан к пути + nonce — при переходе на другое фото ИЛИ после
+        # перегенерации (nonce++) text_area пересоздаётся со свежим капшеном
+        # (а не держит старый текст своего ключа).
+        key = f"gal_edit_{ss.gallery_edit_nonce}_{item['image']}"
         edited = st.text_area("Капшен", item["caption"], height=320, key=key)
 
         busy = worker.is_alive()
@@ -588,6 +589,7 @@ def _gallery_editor(items: list[dict]) -> None:
             params = {**get_params(), "manual_review": False}
             worker.start([task], ss.gallery_folder, params, logger,
                          get_registry(), get_client())
+            ss.gallery_regen = {item["image"]}  # подхватим новый .txt по завершении
             st.toast("Перегенерация запущена…")
             st.rerun()
 
@@ -635,6 +637,7 @@ def _gallery_multiaction(items: list[dict]) -> None:
         params = {**get_params(), "manual_review": False}
         worker.start(tasks, ss.gallery_folder, params, logger,
                      get_registry(), get_client())
+        ss.gallery_regen = {it["image"] for it in sel}  # обновим по завершении
         st.toast(f"Перегенерация {len(tasks)} файлов запущена…")
         ss.gallery_pending = None
         ss.gallery_selected = set()
@@ -750,6 +753,28 @@ def render_gallery_tab() -> None:
     ss.setdefault("gallery_only_missing", False)
     ss.setdefault("gallery_search", "")
     ss.setdefault("gallery_pending", None)
+    ss.setdefault("gallery_regen", set())   # пути, отданные на перегенерацию
+    ss.setdefault("gallery_edit_nonce", 0)  # сброс text_area редактора после refresh
+
+    # Если галерея запускала перегенерацию и воркер закончил — капшены в памяти
+    # (ss.gallery_all) устарели: воркер записал новый .txt на диск, а список мы
+    # читали один раз при скане. Подтягиваем свежие капшены только для затронутых
+    # файлов и «пересобираем» text_area редактора через nonce (иначе виджет
+    # держит старый текст по своему ключу).
+    if ss.gallery_regen and not worker.is_alive():
+        by_path = {it["image"]: it for it in ss.gallery_all}
+        refreshed = 0
+        for img in ss.gallery_regen:
+            it = by_path.get(img)
+            if it is None:
+                continue
+            it["caption"] = ds.read_caption(img)
+            it["has_caption"] = bool(it["caption"].strip())
+            refreshed += 1
+        ss.gallery_regen = set()
+        ss.gallery_edit_nonce += 1
+        if refreshed:
+            st.toast(f"Капшены обновлены: {refreshed}")
 
     st.subheader("Галерея — просмотр и правка капшенов")
 
@@ -1535,6 +1560,10 @@ with tab_gen:
 # Polling в самом конце скрипта: UI живёт в отдельном потоке от генерации, поэтому
 # периодически перерисовываемся — обновляем прогресс/лог/статус и ловим клики по
 # «Стоп»/«Пауза». Делаем это ПОСЛЕ отрисовки лога, чтобы он успел обновиться.
-if _poll:
+# `gallery_regen` в условии: держим polling живым, пока галерея не подхватила
+# свежие капшены после перегенерации. Иначе есть узкое окно (воркер уже выставил
+# running=False, но поток ещё не умер → is_alive() True), где генерация перестаёт
+# поллить, а галерея пропускает refresh — и капшен снова «застревает» старым.
+if _poll or ss.get("gallery_regen"):
     time.sleep(1.0)
     st.rerun()
