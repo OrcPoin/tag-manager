@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import threading
 import time
 from typing import Callable
@@ -118,6 +119,12 @@ class CaptionWorker:
             self.status_msg = "Запуск…"
             self.current_name = ""
             self._start_ts = time.time()
+            self._update_total = 0
+            self._update_done = 0
+            self._update_skipped = 0
+            self._update_errors = 0
+            self._update_deferred = 0
+            self._update_diffs = []
 
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -150,6 +157,12 @@ class CaptionWorker:
             self.status_msg = "Продолжаю…"
             self.current_name = ""
             self._start_ts = time.time()
+            self._update_total = 0
+            self._update_done = 0
+            self._update_skipped = 0
+            self._update_errors = 0
+            self._update_deferred = 0
+            self._update_diffs = []
 
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -454,7 +467,6 @@ class CaptionWorker:
 
     def _run_update(self) -> None:
         import json
-        import shutil
         from config import (
             AUGMENT_INSTRUCTION,
             DEFERRED_REVIEW_FILE,
@@ -467,6 +479,7 @@ class CaptionWorker:
             TAG_STRATEGY_UNION,
             PROSE_STRATEGY_REPLACE,
             UPDATE_MECH_AUGMENT,
+            UPDATE_MECH_FULL,
         )
         from core.dataset import caption_fingerprint
 
@@ -475,6 +488,7 @@ class CaptionWorker:
         tag_strategy_cfg = p.get("tag_strategy", TAG_STRATEGY_UNION)
         prose_strategy_cfg = p.get("prose_strategy", "keep_old")
         manual_policy = p.get("manual_policy", MANUAL_PROTECT)
+        manual_review = p.get("manual_review", False)
         trigger = p.get("trigger_word", "")
         deferred: list[str] = []
 
@@ -533,7 +547,14 @@ class CaptionWorker:
                     tag_strat_eff = tag_strat
                     prose_strat_eff = prose_strat
 
-                # Генерация
+                # tags_only-защита прозы требует мёржа даже в augment-механизме
+                # (иначе свежая проза перезаписала бы ручную). В остальных случаях
+                # augment пишем как есть — см. ниже.
+                protect_prose = (task.manually_edited
+                                 and manual_policy == MANUAL_TAGS_ONLY)
+
+                # augment-промпт (модель видит старый капшен). Считаем один раз:
+                # при «перегенерировать» из ревью гоняем тот же промпт заново.
                 if mechanism == UPDATE_MECH_AUGMENT:
                     user_prompt = p["user_prompt"] + AUGMENT_INSTRUCTION.format(
                         existing=task.existing_caption.strip()
@@ -544,80 +565,83 @@ class CaptionWorker:
                 def on_attempt(n, msg, _name=task.name):
                     self._log(f"[{_name}] попытка {n}: {msg}")
 
-                result = self._client.generate_caption(
-                    image_path=task.image_path,
-                    system_prompt=p["system_prompt"],
-                    user_prompt=user_prompt,
-                    temperature=p["temperature"],
-                    max_tokens=p["max_tokens"],
-                    top_p=p["top_p"],
-                    on_attempt=on_attempt,
-                    max_caption_retries=None if p.get("auto_retry") else 1,
-                    should_stop=lambda: self._stop_event.is_set() or self._pause_event.is_set(),
-                    disable_thinking=p.get("disable_thinking", False),
-                )
+                # Внутренний цикл: «перегенерировать» из ревью возвращает нас сюда.
+                stop_all = False
+                while True:
+                    result = self._client.generate_caption(
+                        image_path=task.image_path,
+                        system_prompt=p["system_prompt"],
+                        user_prompt=user_prompt,
+                        temperature=p["temperature"],
+                        max_tokens=p["max_tokens"],
+                        top_p=p["top_p"],
+                        on_attempt=on_attempt,
+                        max_caption_retries=None if p.get("auto_retry") else 1,
+                        should_stop=lambda: self._stop_event.is_set() or self._pause_event.is_set(),
+                        disable_thinking=p.get("disable_thinking", False),
+                    )
 
-                if result.stopped:
-                    if self._stop_event.is_set():
+                    if result.stopped:
+                        stop_all = self._stop_event.is_set()
+                        break  # пауза/стоп — выходим из внутреннего цикла
+
+                    if not result.success:
+                        task.status = "error"
+                        task.error = result.error
+                        self._update_errors += 1
+                        self._log(f"[{task.name}] ошибка: {result.error}", "error")
+                        with self._lock:
+                            self._update_done += 1
                         break
-                    continue
 
-                if not result.success:
-                    task.status = "error"
-                    task.error = result.error
-                    self._update_errors += 1
-                    self._log(f"[{task.name}] ошибка: {result.error}", "error")
-                    with self._lock:
-                        self._update_done += 1
-                    continue
+                    new_raw = result.caption
 
-                new_raw = result.caption
+                    # Сборка результата:
+                    #  * FULL — генерация с нуля, мёржим старое+новое по стратегиям;
+                    #  * AUGMENT — модель уже вернула улучшённый капшен (видела старый),
+                    #    это и есть результат, пишем как есть (как в режиме перезаписи).
+                    #    merge_captions с keep_old прозой выбросил бы свежую прозу —
+                    #    именно из-за этого augment раньше «терял» описания.
+                    #  * tags_only-защита ручной прозы — единственное исключение для
+                    #    augment: там прозу надо сохранить, поэтому мёржим.
+                    if mechanism == UPDATE_MECH_FULL or protect_prose:
+                        body = merge_captions(task.existing_caption, new_raw,
+                                              tag_strategy=tag_strat_eff,
+                                              prose_strategy=prose_strat_eff)
+                    else:
+                        body = new_raw
 
-                # Мёрж старого и нового по выбранным стратегиям. Для augment
-                # модель уже возвращает почти-готовый текст, но всё равно гоняем
-                # через merge_captions — гарантирует применение стратегий тегов/
-                # прозы и защиту ручных правок (tags_only/keep_old) единообразно.
-                merged = merge_captions(task.existing_caption, new_raw,
-                                        tag_strategy=tag_strat_eff,
-                                        prose_strategy=prose_strat_eff)
+                    if self._stoplist:
+                        body = apply_stoplist(body, self._stoplist)
 
-                if self._stoplist:
-                    merged = apply_stoplist(merged, self._stoplist)
+                    final = apply_trigger(body, trigger).strip()
 
-                final = apply_trigger(merged, trigger).strip() + "\n"
+                    # Идемпотентность: не трогать файл, если ничего не изменилось.
+                    if caption_fingerprint(final) == caption_fingerprint(task.existing_caption.strip()):
+                        task.status = "done"
+                        self._log(f"[{task.name}] без изменений (идемпотентно)")
+                        with self._lock:
+                            self._update_done += 1
+                        break
 
-                # Идемпотентность: не трогать файл, если ничего не изменилось
-                if caption_fingerprint(final.strip()) == caption_fingerprint(task.existing_caption.strip()):
-                    task.status = "done"
-                    self._log(f"[{task.name}] без изменений (идемпотентно)")
-                    with self._lock:
-                        self._update_done += 1
-                    continue
+                    # Ручное ревью: показать предложенный капшен и ждать решения.
+                    if manual_review:
+                        outcome = self._handle_update_review(task, final, cur_prompt_hash)
+                        if outcome == "stop":
+                            stop_all = True
+                            break
+                        if outcome == "regenerate":
+                            continue  # заново генерируем этот же файл
+                        # written | skip — задача завершена
+                        break
 
-                # .bak перед записью
-                try:
-                    shutil.copy2(task.txt_path, task.txt_path + ".bak")
-                except OSError:
-                    pass
+                    # Автоматический режим: записать сразу.
+                    self._write_update(task, final, cur_prompt_hash)
+                    self._log(f"[{task.name}] обновлён ({task.reason})")
+                    break
 
-                with open(task.txt_path, "w", encoding="utf-8") as f:
-                    f.write(final)
-
-                self._registry.mark_done(
-                    task.image_path,
-                    prompt_hash=cur_prompt_hash,
-                    model=self._client.model if self._client else None,
-                    caption=final.strip(),
-                )
-
-                task.caption = final.strip()
-                task.status = "done"
-                with self._lock:
-                    self._update_done += 1
-                    if len(self._update_diffs) < 50:
-                        self._update_diffs.append(
-                            (task.name, task.existing_caption.strip(), final.strip()))
-                self._log(f"[{task.name}] обновлён ({task.reason})")
+                if stop_all:
+                    break
 
             # Сохраняем отложенные на ревью
             if deferred:
@@ -649,3 +673,81 @@ class CaptionWorker:
             with self._lock:
                 self.running = False
                 self.paused = False
+
+    def _write_update(self, task: UpdateTask, final: str, prompt_hash: str) -> None:
+        """Записать обновлённый капшен: .bak, запись, реестр, дифф, счётчик."""
+        try:
+            shutil.copy2(task.txt_path, task.txt_path + ".bak")
+        except OSError:
+            pass
+
+        with open(task.txt_path, "w", encoding="utf-8") as f:
+            f.write(final.strip() + "\n")
+
+        self._registry.mark_done(
+            task.image_path,
+            prompt_hash=prompt_hash,
+            model=self._client.model if self._client else None,
+            caption=final.strip(),
+        )
+
+        task.caption = final.strip()
+        task.status = "done"
+        with self._lock:
+            self._update_done += 1
+            if len(self._update_diffs) < 50:
+                self._update_diffs.append(
+                    (task.name, task.existing_caption.strip(), final.strip()))
+
+    def _handle_update_review(self, task: UpdateTask, proposed: str,
+                              prompt_hash: str) -> str:
+        """Ручное ревью в режиме обновления. Возвращает исход:
+        'stop' | 'regenerate' | 'skip' | 'written'.
+
+        Переиспользует ту же UI-плумбинг, что и обычный режим (review_task /
+        submit_review): показываем ПРЕДЛОЖЕННЫЙ капшен (уже с триггером/мёржем),
+        пользователь принимает / правит / перегенерирует / пропускает.
+        """
+        # Показываем предложенный текст через поле task.caption (его читает
+        # render_review). Оригинал не теряем — он в task.existing_caption.
+        task.caption = proposed.strip()
+        self._review_event.clear()
+        self._review_decision = None
+        with self._lock:
+            self.review_task = task
+            self.status_msg = f"Ожидает проверки: {task.name}"
+
+        while not self._review_event.wait(0.2):
+            if self._stop_event.is_set():
+                with self._lock:
+                    self.review_task = None
+                return "stop"
+
+        decision, edited = self._review_decision or ("skip", "")
+        with self._lock:
+            self.review_task = None
+
+        if self._stop_event.is_set():
+            return "stop"
+
+        if decision == "regenerate":
+            self._log(f"[{task.name}] перегенерация по запросу")
+            return "regenerate"
+
+        if decision == "skip":
+            task.status = "skipped"
+            self._update_skipped += 1
+            self._log(f"Пропущено вручную: {task.name}")
+            with self._lock:
+                self._update_done += 1
+            return "skip"
+
+        # accept | edit — записываем (возможно отредактированный) капшен.
+        # Триггер идемпотентен: если пользователь уже вписал его в правку — не дублируем.
+        caption = edited if edited.strip() else task.caption
+        if self._stoplist:
+            caption = apply_stoplist(caption, self._stoplist)
+        final = apply_trigger(caption, self._params.get("trigger_word", "")).strip()
+        self._write_update(task, final, prompt_hash)
+        self._log(f"{'Правка' if decision == 'edit' else 'Принято'} вручную: {task.name}")
+        return "written"

@@ -77,11 +77,25 @@ class DoneRegistry:
                 self.entries = {}
 
     def save(self) -> None:
+        # Атомарная запись: пишем во временный файл рядом и переименовываем через
+        # os.replace (атомарен на одной ФС). Автосейв после каждой картинки — если
+        # процесс убьют посреди прямого open(w), файл окажется усечён/битым, и при
+        # следующей загрузке JSONDecodeError обнулит реестр → режим «Докачать»
+        # перегенерит весь датасет заново (часы). tmp+replace исключает это: .txt
+        # либо старая целая версия, либо новая целая, но не полузапись.
+        tmp = self.path + ".tmp"
         try:
-            with open(self.path, "w", encoding="utf-8") as f:
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump({"done": self.entries}, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.path)
         except OSError:
-            pass
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
 
     def is_done(self, image_path: str) -> bool:
         """True, если картинка обработана этим приложением и с тех пор не менялась."""

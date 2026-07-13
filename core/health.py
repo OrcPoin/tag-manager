@@ -320,7 +320,9 @@ def convert_to_rgb(path: str, dataset_folder: str) -> bool:
         shutil.copy2(path, backup_path)
         with Image.open(path) as im:
             rgb = ImageOps.exif_transpose(im).convert("RGB")
-            rgb.save(path)
+            ext = os.path.splitext(path)[1].lower()
+            save_kwargs = {"quality": 95} if ext in (".jpg", ".jpeg") else {}
+            rgb.save(path, **save_kwargs)
         return True
     except Exception:  # noqa: BLE001 — при сбое оставляем оригинал как есть
         return False

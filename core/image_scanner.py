@@ -173,8 +173,9 @@ def build_update_plan(
             continue
 
         try:
-            existing = open(txt_path, encoding="utf-8").read()
-        except OSError:
+            with open(txt_path, encoding="utf-8") as f:
+                existing = f.read()
+        except (OSError, UnicodeDecodeError):
             continue
 
         reason_parts: list[str] = []

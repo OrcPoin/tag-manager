@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 rem Запуск Tag Manager. Двойной клик — и приложение откроется в браузере.
 rem Через "python -m streamlit", чтобы не зависеть от streamlit.exe в PATH.
 cd /d "%~dp0"

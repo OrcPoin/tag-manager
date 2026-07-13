@@ -285,6 +285,15 @@ class CaptionClient:
                         on_attempt(0, f"жду загрузки модели… ({load_waits})")
                     _sleep_interruptible(MODEL_LOAD_WAIT_SECONDS, should_stop)
                     continue
+                # 4xx — ошибки клиента: неверная модель (404), плохой запрос
+                # (400/422) и т.п. Повторять бессмысленно — ничего не изменится.
+                status = getattr(exc, "status_code", 0) or 0
+                if 400 <= status < 500:
+                    msg = str(getattr(exc, "message", "") or exc)
+                    raise RuntimeError(
+                        f"Ошибка API ({status}): {msg}. Проверьте настройки "
+                        "(имя модели, параметры)."
+                    )
                 # Прочие 5xx — как обычный транспортный сбой.
                 last_error = exc
                 transport_attempts += 1

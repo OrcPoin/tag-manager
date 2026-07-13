@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from collections import Counter
 
@@ -59,19 +60,30 @@ def find_caption_files(folder: str, recursive: bool) -> list[str]:
 # --------------------------------------------------------------------------- #
 # Разбор тег-строк
 # --------------------------------------------------------------------------- #
+# Признак прозы в строке: знак конца предложения (. ! ?) ЗА которым пробел или
+# конец строки, либо «прозаическое» двоеточие (двоеточие + пробел, как в блоке
+# персонажа "on the left: ..."). Ключевое отличие от старой проверки «есть ли
+# вообще .!?:» — booru-теги сплошь содержат эти символы ВНУТРИ (эмоуты :d, :o,
+# :3, ^_^; имена d.va), но там за знаком идёт буква, а не пробел/конец. Так теги
+# больше не принимаются за прозу и массовые операции их не пропускают молча.
+_PROSE_PUNCT_RE = re.compile(r"[.!?](\s|$)|:\s")
+
+
 def is_tag_line(line: str) -> bool:
     """True, если строка — список тегов, а не проза.
 
-    Проза в нашем формате: предложения COMPOSITION/INTENT (есть `.`/`!`/`?`) и
-    скобочные блоки персонажей (начинаются с `(`, содержат `:`). Всё это должно
-    остаться нетронутым при операциях над тегами.
+    Проза в нашем формате: предложения COMPOSITION/INTENT (кончаются на .!? ) и
+    скобочные блоки персонажей (начинаются с `(`, есть «слово: …»). Всё это должно
+    остаться нетронутым при операциях над тегами. При этом danbooru-теги штатно
+    содержат `.`/`:` внутри (`:d`, `:3`, `d.va`) — их за прозу НЕ считаем, потому
+    что там за знаком не пробел/конец строки, а символ тега.
     """
     s = line.strip()
     if not s:
         return False
     if s.startswith("("):
         return False
-    if any(ch in s for ch in ".!?:"):
+    if _PROSE_PUNCT_RE.search(s):
         return False
     return True
 
@@ -302,16 +314,19 @@ def _union_missing_tags(old_tags: str, new_tags: str) -> str:
 
     Порядок и структура old сохраняются, недостающие теги дописываются в первую
     тег-строку через существующий add_tag_to_caption (та же логика, что в UI).
-    Сравнение регистронезависимое, поэтому повторный прогон не плодит дубли.
+    Сравнение регистронезависимое, пробелы нормализуются (схлопываем двойные),
+    поэтому повторный прогон не плодит дубли.
     """
     if not old_tags.strip():
         return new_tags
-    have = {t for t in extract_tags(old_tags)}
+    _norm = lambda s: " ".join(s.split())
+    have = {_norm(t) for t in extract_tags(old_tags)}
     result = old_tags
     for tag in extract_tags(new_tags):
-        if tag not in have:
+        key = _norm(tag)
+        if key not in have:
             result = add_tag_to_caption(result, tag)
-            have.add(tag)
+            have.add(key)
     return result
 
 

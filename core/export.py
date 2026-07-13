@@ -6,6 +6,11 @@ import json
 import os
 
 
+def _toml_escape(s: str) -> str:
+    """Экранировать строку для вставки в двойные кавычки TOML."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def export_onetrainer(
     folder: str,
     trigger: str = "",
@@ -40,7 +45,7 @@ def export_kohya_toml(
     resolution: int = 512,
 ) -> str:
     """TOML-конфиг kohya dataset subset (без зависимости от toml-библиотек)."""
-    abs_path = os.path.abspath(folder).replace("\\", "/")
+    abs_path = _toml_escape(os.path.abspath(folder).replace("\\", "/"))
     lines = [
         "[general]",
         f"resolution = {resolution}",
@@ -55,5 +60,5 @@ def export_kohya_toml(
         f"num_repeats = {repeats}",
     ]
     if trigger.strip():
-        lines.append(f'activation_text = "{trigger.strip()}"')
+        lines.append(f'activation_text = "{_toml_escape(trigger.strip())}"')
     return "\n".join(lines) + "\n"

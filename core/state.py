@@ -62,11 +62,22 @@ class ProcessingState:
             "errors": self.errors,
             "tasks": [asdict(t) for t in self.tasks],
         }
+        # Атомарная запись (tmp+os.replace): прогресс тоже сохраняется после
+        # каждого файла, и обрыв посреди прямого open(w) оставил бы битый JSON —
+        # кнопка «Продолжить прошлый прогон» тогда не смогла бы его прочитать.
+        tmp = PROGRESS_FILE + ".tmp"
         try:
-            with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, PROGRESS_FILE)
         except OSError:
-            pass
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
 
     def load_progress(self) -> bool:
         """Восстановить прогресс из файла. True при успехе."""
