@@ -16,6 +16,7 @@ from core import dataset as ds
 from core import health
 from core.image_scanner import find_images
 from ui.common import folder_picker_row, probe_cached, thumbnail
+from ui.design import empty_state, section_heading
 
 
 def _thumbs(paths: list[str], cols: int = 6, limit: int = 24) -> None:
@@ -51,7 +52,7 @@ def render_health_tab() -> None:
     ss.setdefault("health_recursive", False)
     ss.setdefault("health", None)
 
-    st.subheader("Аудит датасета перед обучением")
+    section_heading("DATASET HEALTH", "Проверка перед обучением", "Найдите проблемы, не удаляя оригиналы: исправления и карантин остаются обратимыми.")
 
     if ss.worker.is_alive():
         st.warning("Идёт генерация капшенов. Аудит и карантин заблокированы, чтобы "
@@ -62,7 +63,7 @@ def render_health_tab() -> None:
         "health_folder_input", "health_rec", ss.health_recursive,
         ss.health_folder or ss.folder)
 
-    if st.button("🩺 Сканировать датасет"):
+    if st.button("Проверить dataset", type="primary"):
         if not os.path.isdir(folder):
             st.error("Папка не найдена")
         else:
@@ -98,7 +99,7 @@ def render_health_tab() -> None:
 
     data = ss.health
     if not data:
-        st.info("Укажите папку датасета и нажмите «Сканировать датасет».")
+        empty_state("Dataset ещё не проверен", "Запустите аудит, чтобы найти битые файлы, дубли, сироты и проблемы captions.")
         return
 
     probes = data["probes"]

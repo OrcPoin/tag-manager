@@ -10,6 +10,7 @@ import os
 
 import streamlit as st
 
+import config
 from core import dataset as ds
 from core import op_history
 from core.image_scanner import ImageTask
@@ -22,6 +23,7 @@ from ui.common import (
     thumbnail,
 )
 from ui.context import get_client, get_params, logger
+from ui.design import empty_state, section_heading
 
 
 def _gallery_registry() -> DoneRegistry:
@@ -99,9 +101,22 @@ def _editor(items: list[dict]) -> None:
         # перегенерации (nonce++) text_area пересоздаётся со свежим капшеном
         # (а не держит старый текст своего ключа).
         key = f"gal_edit_{ss.gallery_edit_nonce}_{item['image']}"
-        edited = st.text_area("Капшен", item["caption"], height=320, key=key)
+        edited = st.text_area(
+            "Капшен", item["caption"],
+            height=int(ss.get("caption_edit_height", config.DEFAULT_CAPTION_EDIT_HEIGHT)),
+            key=key)
 
         busy = ss.worker.is_alive()
+        # Пояснение для перегенерации: пользователь пишет, что модель упустила
+        # или переврала; текст уйдёт в промпт вместе с фото. Пусто → обычная
+        # перегенерация без подсказки.
+        hint = st.text_area(
+            "Пояснение для перегенерации (необязательно)", key=f"gal_hint_{item['image']}",
+            height=90, disabled=busy,
+            placeholder="Например: на фото два персонажа, а не один; фон — ночной город.",
+            help="Что модель упустила или неверно описала. Уйдёт в промпт при "
+                 "нажатии «Перегенерировать». Оставьте пустым для обычной перегенерации.",
+        )
         bcols = st.columns(2)
         if bcols[0].button("💾 Сохранить", type="primary", width="stretch",
                            disabled=busy):
@@ -118,11 +133,12 @@ def _editor(items: list[dict]) -> None:
                                 "Займёт столько же, сколько обычная генерация одного файла."):
             task = ImageTask(image_path=item["image"], txt_path=item["txt"])
             # manual_review=False → воркер запишет результат сразу, без паузы.
-            params = {**get_params(), "manual_review": False}
+            params = {**get_params(), "manual_review": False, "regen_hint": hint}
             ss.worker.start([task], ss.gallery_folder, params, logger(),
                             _gallery_registry(), get_client())
             ss.gallery_regen = {item["image"]}  # подхватим новый .txt по завершении
-            st.toast("Перегенерация запущена…")
+            st.toast("Перегенерация с пояснением запущена…" if hint.strip()
+                     else "Перегенерация запущена…")
             st.rerun()
 
         if busy:
@@ -311,7 +327,7 @@ def render_gallery_tab() -> None:
         if refreshed:
             st.toast(f"Капшены обновлены: {refreshed}")
 
-    st.subheader("Галерея — просмотр и правка капшенов")
+    section_heading("RESULTS", "Галерея captions", "Изображение — главный объект; фильтры и массовые действия появляются только по контексту.")
 
     ss.setdefault("gallery_folder_input", ss.gallery_folder or ss.folder)
     c = st.columns([5, 1, 1, 1], vertical_alignment="bottom")
@@ -320,7 +336,7 @@ def render_gallery_tab() -> None:
                 on_click=browse_into, args=("gallery_folder_input",))
     recursive = c[2].checkbox("Рекурсивно", ss.gallery_recursive,
                               key="gallery_recursive_cb")
-    if c[3].button("🔍 Сканировать", width="stretch"):
+    if c[3].button("Сканировать", width="stretch", type="primary"):
         if os.path.isdir(folder):
             _scan(folder, recursive)
             st.toast(f"Изображений: {len(ss.gallery_all)}")
@@ -329,7 +345,7 @@ def render_gallery_tab() -> None:
             st.error("Папка не найдена")
 
     if not ss.gallery_all:
-        st.info("Укажите папку и нажмите «Сканировать».")
+        empty_state("Галерея пока пуста", "Выберите dataset и просканируйте его — изображения появятся здесь с captions и статусами.")
         return
 
     # Фильтры (in-memory, быстрые даже на тысячах файлов).

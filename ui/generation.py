@@ -25,6 +25,7 @@ from core.image_scanner import (
 from core.registry import prompt_signature
 from ui.common import fmt_duration
 from ui.context import get_client, get_params, get_registry, logger
+from ui.design import section_heading
 
 
 def render_review(task, preview_col, caption_col) -> None:
@@ -51,8 +52,31 @@ def render_review(task, preview_col, caption_col) -> None:
             ss["_review_ident"] = ident
             ss["_review_nonce"] = ss.get("_review_nonce", 0) + 1
         edited = st.text_area(
-            "Капшен", task.caption, height=220,
+            "Капшен", task.caption,
+            height=int(ss.get("caption_edit_height", config.DEFAULT_CAPTION_EDIT_HEIGHT)),
             key=f"review_caption_{ss.get('_review_nonce', 0)}",
+        )
+        # Пояснение живёт на уровне ФАЙЛА, а не капшена: при перегенерации капшен
+        # меняется (nonce капшена растёт), но подсказку надо сохранить — человек
+        # уточняет её от попытки к попытке. Сбрасываем только при переходе на
+        # НОВЫЙ файл. Плюс держим текст в ручном слоте `_review_hint_text`: между
+        # перегенерациями панель ~10 мин не рисуется, Streamlit подчищает ключ
+        # виджета — при возврате value честно восстановит сохранённый текст.
+        if ss.get("_review_hint_file") != task.name:
+            ss["_review_hint_file"] = task.name
+            ss["_review_hint_text"] = ""
+            ss["_review_hint_nonce"] = ss.get("_review_hint_nonce", 0) + 1
+        hint = st.text_area(
+            "Пояснение для перегенерации (необязательно)",
+            value=ss.get("_review_hint_text", ""),
+            key=f"review_hint_{ss.get('_review_hint_nonce', 0)}",
+            height=80,
+            placeholder="Что модель упустила или переврала — например: «на фото две "
+                        "девушки, а не одна; фон — лес, а не комната».",
+            help="Если заполнить и нажать «Перегенерировать», текст уйдёт модели "
+                 "вместе с фото и промптом, чтобы она это учла. Сохраняется между "
+                 "перегенерациями этого файла; очищается при переходе к следующему. "
+                 "Пусто → обычная перегенерация.",
         )
         b1, b2, b3, b4 = st.columns(4)
         if b1.button("✅ Принять"):
@@ -60,7 +84,8 @@ def render_review(task, preview_col, caption_col) -> None:
             time.sleep(0.3)
             st.rerun()
         if b2.button("🔄 Перегенерировать"):
-            worker.submit_review("regenerate")
+            ss["_review_hint_text"] = hint  # переживёт паузу, пока генерится заново
+            worker.submit_review("regenerate", hint=hint)
             time.sleep(0.3)
             st.rerun()
         if b3.button("✏️ Сохранить правку"):
@@ -79,7 +104,7 @@ def render_generation_tab() -> bool:
     worker = ss.worker
 
     # --- Выбор папки и режима ---
-    st.subheader("1. Папка и режим")
+    section_heading("ШАГ 1", "Что обработать")
     col_f1, col_f2 = st.columns([5, 1], vertical_alignment="bottom")
     with col_f1:
         ss.folder = st.text_input("Путь к папке с изображениями", ss.folder)
@@ -92,11 +117,58 @@ def render_generation_tab() -> bool:
             else:
                 st.toast("Диалог недоступен — введите путь вручную")
 
-    col_m1, col_m2 = st.columns([2, 3])
-    with col_m1:
-        ss.recursive = st.checkbox("Рекурсивно (включая подпапки)", ss.recursive)
-    with col_m2:
-        st.selectbox("Режим обработки", config.UI_MODES, key="mode")
+    ss.recursive = st.checkbox("Включать изображения из подпапок", ss.recursive)
+    mode_presentations = {
+        config.MODE_RESUME: ("Продолжить", "Обработать только то, что приложение ещё не завершило."),
+        config.MODE_ONLY_MISSING: ("Заполнить пропуски", "Создать подписи только там, где ещё нет текстового файла."),
+        config.MODE_UPDATE: ("Умно обновить", "Освежить устаревшие результаты с защитой ручных правок."),
+        config.MODE_ALL: ("Пересоздать всё", "Полностью перезаписать подписи для всех изображений."),
+        config.MODE_SKIP_PROCESSED: ("По дате файлов", "Пропустить подписи, которые новее изображения."),
+    }
+    mode_columns = st.columns(len(config.UI_MODES))
+    st.markdown('<div class="tm-mode-picker">', unsafe_allow_html=True)
+    for column, mode in zip(mode_columns, config.UI_MODES):
+        title, description = mode_presentations[mode]
+        selected = ss.mode == mode
+        with column:
+            if st.button(title, key=f"mode_card_{mode}", help=description,
+                         width="stretch", type="primary" if selected else "secondary",
+                         disabled=False):
+                ss.mode = mode
+                if not selected:
+                    st.rerun()
+            st.caption(description)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    with st.expander("Состав результата", expanded=False):
+        from core.taggers.registry import TAGGER_SPECS
+        installed = [key for key, spec in TAGGER_SPECS.items()
+                     if ss.tagger_manager.installed(key)]
+        st.caption("Выберите, какой результат должен получить каждый файл.")
+        pipeline_choices = {
+            "description_only": ("Описание", "Модель создаёт естественное описание изображения."),
+            "tags_only": ("Только теги", "Модель распознавания создаёт компактный набор тегов."),
+            "tags_and_description": ("Теги + описание", "Сохранить оба вида результата."),
+            "tags_to_vlm_context": ("Теги помогают описанию", "Распознанные теги помогают точнее описать сцену."),
+        }
+        pipeline_columns = st.columns(len(pipeline_choices))
+        for column, (value, (label, help_text)) in zip(pipeline_columns, pipeline_choices.items()):
+            active = ss.get("pipeline_mode", "description_only") == value
+            with column:
+                if st.button(label, key=f"pipeline_choice_{value}", width="stretch",
+                             type="primary" if active else "secondary",
+                             help=help_text):
+                    ss.pipeline_mode = value
+                    if not active:
+                        st.rerun()
+        ss.pipeline_tagger_ids = st.multiselect(
+            "Модели распознавания тегов", installed,
+            default=ss.get("pipeline_tagger_ids", []),
+            help="Показываются только установленные модели. Установка находится в Библиотеке.",
+        )
+        if ss.get("show_advanced", False):
+            st.number_input("Максимальное количество тегов", 1, 1000,
+                            int(ss.get("pipeline_top_k", 128)), key="pipeline_top_k")
 
     # --- Настройки обновления (только для MODE_UPDATE) ---
     if ss.mode == config.MODE_UPDATE:
@@ -168,7 +240,7 @@ def render_generation_tab() -> bool:
                 f"сделано этим приложением: **{s.get('done_by_app', 0)}**")
 
     # --- Пресеты и промпты ---
-    st.subheader("2. Пресет и промпты")
+    section_heading("ШАГ 2", "Как должен выглядеть результат")
     preset_names = list(ss.presets.keys())
     col_p1, col_p2, col_p3 = st.columns([3, 1, 1])
     with col_p1:
@@ -220,17 +292,18 @@ def render_generation_tab() -> bool:
     # ----------------------------------------------------------------------- #
     # Управление обработкой
     # ----------------------------------------------------------------------- #
-    st.subheader("3. Обработка")
+    section_heading("ШАГ 3", "Запуск обработки")
 
     snap = worker.snapshot()
     running = snap["running"]
+    preview_busy = bool(ss.get("preview_runner") and ss.preview_runner.is_alive())
     paused = snap["paused"]
     has_review = snap["has_review"]
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        start_clicked = st.button("▶️ Запустить", width="stretch",
-                                  disabled=running)
+        start_clicked = st.button("Начать обработку", width="stretch",
+                                  disabled=running or preview_busy, type="primary")
     with c2:
         pause_clicked = st.button("⏸️ Пауза", width="stretch",
                                   disabled=not running or paused or has_review)
@@ -278,6 +351,9 @@ def render_generation_tab() -> bool:
                 worker.start(tasks, ss.folder, get_params(), logger(),
                              get_registry(), get_client())
                 st.rerun()
+
+    if preview_busy:
+        st.info("Сначала дождитесь завершения проверки одного изображения.")
 
     if pause_clicked:
         worker.pause()          # мгновенный обрыв генерации на сервере + удержание

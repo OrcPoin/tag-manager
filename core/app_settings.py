@@ -16,8 +16,31 @@ from config import SETTINGS_FILE
 # Ключи, которые персистятся. Значения по умолчанию берутся из config при старте
 # (см. app.init_state) — здесь только перечень того, что сохраняем/грузим.
 PERSISTED_KEYS = (
+    "backend_type",
     "api_url",
     "model",
+    "llama_executable",
+    "model_directory",
+    "mmproj_directory",
+    "llama_model",
+    "llama_mmproj",
+    "llama_host",
+    "llama_port",
+    "llama_api_prefix",
+    "llama_startup_timeout",
+    "llama_optimization_mode",
+    "llama_reasoning_budget",
+    "llama_cache_k",
+    "llama_cache_v",
+    "llama_flash_attn",
+    "llama_load_mode",
+    "llama_slots",
+    "llama_threads",
+    "llama_batch",
+    "llama_ubatch",
+    "llama_gpu_layers",
+    "llama_fit_target",
+    "llama_context_size",
     "temperature",
     "max_tokens",
     "top_p",
@@ -27,7 +50,17 @@ PERSISTED_KEYS = (
     "disable_thinking",
     "trigger_word",
     "notify_on_finish",
+    "caption_edit_height",
+    "folder",
+    "recursive",
+    "preset_name",
+    "pipeline_mode",
+    "pipeline_tagger_ids",
+    "ui_theme",
 )
+
+# Ошибочное имя кратко использовалось в незавершённой версии настройки.
+_KEY_MIGRATIONS = {"caption_editor_height": "caption_edit_height"}
 
 
 def load_settings() -> dict:
@@ -38,6 +71,10 @@ def load_settings() -> dict:
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
+            data = dict(data)
+            for old, new in _KEY_MIGRATIONS.items():
+                if new not in data and old in data:
+                    data[new] = data[old]
             # Возвращаем только известные ключи — на случай старого/чужого файла.
             return {k: data[k] for k in PERSISTED_KEYS if k in data}
     except (OSError, json.JSONDecodeError):
@@ -48,8 +85,16 @@ def load_settings() -> dict:
 def save_settings(values: dict) -> None:
     """Записать настройки в settings.json (только PERSISTED_KEYS)."""
     data = {k: values[k] for k in PERSISTED_KEYS if k in values}
+    tmp = SETTINGS_FILE + ".tmp"
     try:
-        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, SETTINGS_FILE)
     except OSError:
-        pass
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass

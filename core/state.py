@@ -23,6 +23,7 @@ class ProcessingState:
         self.processed: int = 0
         self.skipped: int = 0
         self.errors: int = 0
+        self.run_id: str = ""
 
     # --- Очередь ---
     def set_tasks(self, tasks: list[ImageTask], folder: str) -> None:
@@ -55,6 +56,8 @@ class ProcessingState:
     # --- Сохранение / восстановление прогресса ---
     def save_progress(self) -> None:
         data = {
+            "schema_version": 2,
+            "run_id": self.run_id,
             "folder": self.folder,
             "index": self.index,
             "processed": self.processed,
@@ -87,6 +90,7 @@ class ProcessingState:
             with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             self.folder = data.get("folder", "")
+            self.run_id = str(data.get("run_id", ""))
             self.index = data.get("index", 0)
             self.processed = data.get("processed", 0)
             self.skipped = data.get("skipped", 0)
@@ -96,9 +100,27 @@ class ProcessingState:
                              ("image_path", "txt_path", "status", "caption", "error")})
                 for t in data.get("tasks", [])
             ]
+            self._reconcile_completed_files()
             return True
         except (OSError, json.JSONDecodeError, TypeError):
             return False
+
+    def _reconcile_completed_files(self) -> None:
+        """Move resume index back when a supposedly completed caption is absent."""
+        first_invalid = self.index
+        for task_index, task in enumerate(self.tasks[:self.index]):
+            try:
+                valid = os.path.isfile(task.txt_path) and os.path.getsize(task.txt_path) > 0
+            except OSError:
+                valid = False
+            if task.status == "done" and not valid:
+                task.status = "pending"
+                task.caption = ""
+                task.error = "caption missing during resume reconciliation"
+                first_invalid = min(first_invalid, task_index)
+        if first_invalid < self.index:
+            self.index = first_invalid
+            self.processed = sum(1 for task in self.tasks[:self.index] if task.status == "done")
 
     def clear_progress(self) -> None:
         try:

@@ -17,14 +17,22 @@ import streamlit as st
 import config
 from core import app_settings
 from core import presets as presets_mod
-from core.caption_client import CaptionClient
+from core.inference.external_api import ExternalApiBackend
+from core.inference.profiles import load_backend_profiles
 from core.logger import Logger
 from core.worker import CaptionWorker
+from core.taggers.manager import TaggerManager
+from core.preview import PreviewRunner
 from ui.generation import render_generation_tab
 from ui.gallery import render_gallery_tab
 from ui.health import render_health_tab
 from ui.sidebar import render_sidebar
 from ui.tags import render_tags_tab
+from ui.workspace import render_workspace
+from ui.runs import render_runs
+from ui.diagnostics import render_diagnostics
+from ui.library import render_library
+from ui.design import inject_design_system, top_bar
 
 st.set_page_config(page_title="Tag Manager", page_icon="🏷️", layout="wide")
 
@@ -49,6 +57,16 @@ def get_shared_logger() -> Logger:
     return Logger(config.LOG_FILE)
 
 
+@st.cache_resource
+def get_shared_tagger_manager() -> TaggerManager:
+    return TaggerManager()
+
+
+@st.cache_resource
+def get_shared_preview_runner() -> PreviewRunner:
+    return PreviewRunner()
+
+
 # --------------------------------------------------------------------------- #
 # Инициализация session_state
 # --------------------------------------------------------------------------- #
@@ -59,11 +77,38 @@ def init_state() -> None:
     ss.initialized = True
     ss.worker = get_shared_worker()
     ss.logger = get_shared_logger()
+    ss.tagger_manager = get_shared_tagger_manager()
+    ss.preview_runner = get_shared_preview_runner()
     ss.presets = presets_mod.load_presets()
+    ss.backend_profiles = load_backend_profiles()
+    ss.backend_profile_name = ""
 
     # Настройки API (дефолты из config)
+    ss.backend_type = config.DEFAULT_BACKEND_TYPE
     ss.api_url = config.DEFAULT_API_URL
     ss.model = config.DEFAULT_MODEL
+    ss.llama_executable = config.DEFAULT_LLAMA_EXECUTABLE
+    ss.model_directory = config.DEFAULT_MODEL_DIRECTORY
+    ss.mmproj_directory = config.DEFAULT_MMPROJ_DIRECTORY
+    ss.llama_model = config.DEFAULT_LLAMA_MODEL
+    ss.llama_mmproj = config.DEFAULT_LLAMA_MMPROJ
+    ss.llama_host = config.DEFAULT_LLAMA_HOST
+    ss.llama_port = config.DEFAULT_LLAMA_PORT
+    ss.llama_api_prefix = config.DEFAULT_LLAMA_API_PREFIX
+    ss.llama_startup_timeout = config.DEFAULT_LLAMA_STARTUP_TIMEOUT
+    ss.llama_optimization_mode = config.DEFAULT_LLAMA_OPTIMIZATION_MODE
+    ss.llama_reasoning_budget = config.DEFAULT_LLAMA_REASONING_BUDGET
+    ss.llama_cache_k = config.DEFAULT_LLAMA_CACHE_K
+    ss.llama_cache_v = config.DEFAULT_LLAMA_CACHE_V
+    ss.llama_flash_attn = config.DEFAULT_LLAMA_FLASH_ATTN
+    ss.llama_load_mode = config.DEFAULT_LLAMA_LOAD_MODE
+    ss.llama_slots = config.DEFAULT_LLAMA_SLOTS
+    ss.llama_threads = config.DEFAULT_LLAMA_THREADS
+    ss.llama_batch = config.DEFAULT_LLAMA_BATCH
+    ss.llama_ubatch = config.DEFAULT_LLAMA_UBATCH
+    ss.llama_gpu_layers = config.DEFAULT_LLAMA_GPU_LAYERS
+    ss.llama_fit_target = config.DEFAULT_LLAMA_FIT_TARGET
+    ss.llama_context_size = config.DEFAULT_LLAMA_CONTEXT_SIZE
     ss.temperature = config.DEFAULT_TEMPERATURE
     ss.max_tokens = config.DEFAULT_MAX_TOKENS
     ss.top_p = config.DEFAULT_TOP_P
@@ -73,24 +118,34 @@ def init_state() -> None:
     ss.disable_thinking = config.DEFAULT_DISABLE_THINKING  # выключить размышления модели
     ss.trigger_word = config.DEFAULT_TRIGGER_WORD  # триггер стиля, подставляется первым тегом
     ss.notify_on_finish = True  # браузерное уведомление по завершении
+    ss.caption_edit_height = config.DEFAULT_CAPTION_EDIT_HEIGHT  # высота полей правки капшена
+    ss.folder = ""
+    ss.recursive = False
+    ss.pipeline_mode = "description_only"
+    ss.pipeline_tagger_ids = []
 
     # Накладываем сохранённые «липкие» настройки поверх дефолтов, чтобы не
     # переставлять галки/слайдеры при каждом запуске (settings.json).
     for k, v in app_settings.load_settings().items():
         ss[k] = v
 
+    # Старый default 12288 превышает проверенный managed context 8192 ещё до
+    # учёта prompt/image tokens. Мигрируем только это заведомо несовместимое
+    # значение; меньшие пользовательские настройки сохраняем.
+    if ss.backend_type == "managed_llama" and int(ss.max_tokens) > 4096:
+        ss.max_tokens = config.DEFAULT_MAX_TOKENS
+
     # Подтягиваем активную модель с сервера ПОСЛЕ восстановления api_url (сервер
     # обычно уже поднят). Тихо игнорируем недоступность — останется сохранённое.
-    _detected = CaptionClient(
-        base_url=ss.api_url, api_key=config.DEFAULT_API_KEY,
-        model=ss.model, timeout=10.0,
-    ).active_model()
-    if _detected:
-        ss.model = _detected
+    if ss.backend_type == "external":
+        _detected = ExternalApiBackend(
+            base_url=ss.api_url, api_key=config.DEFAULT_API_KEY,
+            model=ss.model, timeout=10.0,
+        ).active_model()
+        if _detected:
+            ss.model = _detected
 
-    # Папка / режим
-    ss.folder = ""
-    ss.recursive = False
+    # Режим обработки. Последняя папка/recursive уже восстановлены из settings.
     ss.mode = config.PROCESSING_MODES[0]
 
     # Настройки обновления (Фаза 5)
@@ -105,9 +160,10 @@ def init_state() -> None:
 
     # Промпты
     first_preset = next(iter(ss.presets))
-    ss.preset_name = first_preset
-    ss.system_prompt = ss.presets[first_preset]["system"]
-    ss.user_prompt = ss.presets[first_preset]["user"]
+    if ss.get("preset_name") not in ss.presets:
+        ss.preset_name = first_preset
+    ss.system_prompt = ss.presets[ss.preset_name]["system"]
+    ss.user_prompt = ss.presets[ss.preset_name]["user"]
 
     # Реестр текущей папки и служебное
     ss.scan_info = None
@@ -125,29 +181,62 @@ if not ss.folder and ss.worker.state.folder:
 
 
 # --------------------------------------------------------------------------- #
-# Раскладка. Порядок исполнения сохранён из исходной версии: сайдбар → галерея →
-# теги → здоровье → генерация. Он важен, т.к. вкладки читают ss.trigger_word/model,
-# а генерация их пишет (эффект применяется на следующем ререндере).
+# Новая плоская навигация группирует функции по пользовательским задачам. Старые
+# render-функции сохраняются как миграционный слой, но тяжёлые экраны больше не
+# исполняются все сразу на каждом rerun.
 # --------------------------------------------------------------------------- #
-st.title("🏷️ Tag Manager")
-st.caption("Генерация детальных капшенов для изображений через локальный LLM")
+ss.setdefault("ui_theme", "light")
+inject_design_system()
+_header_snapshot = ss.worker.snapshot()
+_header_status = "Обработка выполняется" if _header_snapshot.get("running") else "Готов к работе"
+_theme_change = top_bar(_header_status)
+if _theme_change:
+    ss.ui_theme = _theme_change
+    app_settings.save_settings({
+        key: ss[key] for key in app_settings.PERSISTED_KEYS if key in ss
+    })
+    st.rerun()
 
-tab_gen, tab_gallery, tab_tags, tab_health = st.tabs(
-    ["🤖 Генерация", "🖼️ Галерея", "🏷️ Теги", "🩺 Здоровье"])
+page_labels = ["Работа", "Результаты", "Запуски", "Ресурсы", "Система"]
+ss.setdefault("main_page", "Работа")
+ss.main_page = {"Библиотека": "Ресурсы", "Диагностика": "Система"}.get(
+    ss.main_page, ss.main_page
+)
+nav_columns = st.columns(len(page_labels))
+for nav_column, nav_page in zip(nav_columns, page_labels):
+    active = ss.main_page == nav_page
+    with nav_column:
+        if st.button(nav_page, key=f"nav_{nav_page}",
+                     width="stretch", type="primary" if active else "secondary"):
+            ss.main_page = nav_page
+            if not active:
+                st.rerun()
+page = ss.main_page
 
 render_sidebar()
+poll = ss.worker.is_alive() or ss.preview_runner.is_alive()
 
-with tab_gallery:
-    render_gallery_tab()
-
-with tab_tags:
-    render_tags_tab()
-
-with tab_health:
-    render_health_tab()
-
-with tab_gen:
-    poll = render_generation_tab()
+if page == "Работа":
+    render_workspace()
+    with st.expander("Настройка и запуск", expanded=bool(ss.folder)):
+        poll = render_generation_tab() or poll
+elif page == "Результаты":
+    result_page = st.segmented_control(
+        "Инструмент результатов", ["Галерея", "Массовые правки", "Здоровье"],
+        default="Галерея", label_visibility="collapsed", key="results_page",
+    )
+    if result_page == "Галерея":
+        render_gallery_tab()
+    elif result_page == "Массовые правки":
+        render_tags_tab()
+    else:
+        render_health_tab()
+elif page == "Запуски":
+    render_runs()
+elif page == "Ресурсы":
+    render_library()
+else:
+    render_diagnostics()
 
 # Polling в самом конце скрипта: UI живёт в отдельном потоке от генерации, поэтому
 # периодически перерисовываемся — обновляем прогресс/лог/статус и ловим клики по

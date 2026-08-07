@@ -7,6 +7,50 @@ DEFAULT_API_URL = "http://127.0.0.1:5000/v1"
 DEFAULT_MODEL = "local-model"  # заглушка: при старте подменяется активной моделью сервера
 DEFAULT_API_KEY = "not-needed"  # локальному серверу ключ не нужен
 
+# --- Managed llama.cpp backend ---
+DEFAULT_BACKEND_TYPE = "managed_llama"
+DEFAULT_LLAMA_EXECUTABLE = ""
+DEFAULT_MODEL_DIRECTORY = r"X:\AI\textgen-portable-4.8-windows-cuda12.4\user_data\models"
+DEFAULT_MMPROJ_DIRECTORY = r"X:\AI\textgen-portable-4.8-windows-cuda12.4\user_data\mmproj"
+DEFAULT_LLAMA_MODEL = ""
+DEFAULT_LLAMA_MMPROJ = ""
+DEFAULT_LLAMA_HOST = "127.0.0.1"
+DEFAULT_LLAMA_PORT = 8080
+DEFAULT_LLAMA_API_PREFIX = "/v1"
+DEFAULT_LLAMA_STARTUP_TIMEOUT = 180
+LLAMA_LOG_FILE = "llama-server.log"
+LLAMA_VERSIONS_DIR = "llama"
+DEFAULT_LLAMA_BUILD = "cuda-12.4"
+# Проверенный профиль для локального captioning: llama.cpp сам раскладывает
+# обычные и MoE tensors по CPU/GPU с резервом VRAM; один server slot не
+# размножает KV cache. Phase 2 заменит это hardware-aware профилями.
+DEFAULT_LLAMA_EXTRA_ARGS = (
+    "-ngl", "auto",
+    "-fit", "on",
+    "-fitt", "512",
+    "-c", "8192",
+    "-b", "2048",
+    "-ub", "2048",
+    "-np", "1",
+    "--no-mmap",
+    "-fa", "auto",
+)
+DEFAULT_LLAMA_OPTIMIZATION_MODE = "auto"
+DEFAULT_LLAMA_REASONING_BUDGET = 5120
+DEFAULT_LLAMA_CACHE_K = "q8_0"
+DEFAULT_LLAMA_CACHE_V = "q8_0"
+DEFAULT_LLAMA_FLASH_ATTN = "auto"
+DEFAULT_LLAMA_LOAD_MODE = "no-mmap"
+DEFAULT_LLAMA_SLOTS = 1
+DEFAULT_LLAMA_THREADS = 0
+DEFAULT_LLAMA_BATCH = 2048
+DEFAULT_LLAMA_UBATCH = 2048
+DEFAULT_LLAMA_GPU_LAYERS = "auto"
+DEFAULT_LLAMA_FIT_TARGET = 512
+DEFAULT_LLAMA_CONTEXT_SIZE = 16384
+BACKEND_PROFILES_FILE = "backend_profiles.json"
+DIAGNOSTICS_FILE = "diagnostics.json"
+
 # --- Параметры генерации ---
 DEFAULT_TEMPERATURE = 0.7
 # max_tokens — это ПОТОЛОК, а не цель: модель останавливается сама (finish=stop),
@@ -15,7 +59,7 @@ DEFAULT_TEMPERATURE = 0.7
 # (≈10.3к всего). При 8192 такой анализ обрывался по length с ПУСТЫМ ответом.
 # 12288 покрывает многоперсонажные сцены и спокойно влезает в контекст 16к.
 # Для совсем многолюдных сцен поднимайте вместе с контекстом модели.
-DEFAULT_MAX_TOKENS = 12288
+DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TOP_P = 0.9
 # Таймаут ОДНОГО запроса. Thinking-модель на многоперсонажной сцене может
 # генерировать 8-10 минут (~13 ток/с * тысячи токенов). Ставим с запасом,
@@ -74,6 +118,10 @@ PRESETS_FILE = "presets.json"
 PROGRESS_FILE = "progress.json"
 LOG_FILE = "processing_log.txt"
 SETTINGS_FILE = "settings.json"  # «липкие» настройки UI между сессиями
+# Высота (px) полей редактирования капшена (ручное ревью + галерея). Streamlit не
+# запоминает размер, заданный перетаскиванием мышью, поэтому даём его настройкой,
+# которая сохраняется в settings.json. Минимум 68 (ограничение st.text_area).
+DEFAULT_CAPTION_EDIT_HEIGHT = 220
 STOPLIST_FILE = "stoplist.txt"   # стоп-лист тегов (один тег на строку)
 # Отложенное ревью (Фаза 5): пути капшенов, требующих ручного взгляда ПОСЛЕ
 # прогона обновления (напр. правил человек, а политика = «спросить»). Прогон их
@@ -219,4 +267,16 @@ AUGMENT_INSTRUCTION = (
     "is wrong. Do not remove correct information. If the existing caption is "
     "already complete and accurate, output it unchanged. Output ONLY the final "
     "caption, no commentary.\n\nEXISTING CAPTION:\n{existing}"
+)
+
+# Пояснение от пользователя при перегенерации (ручное ревью и галерея). Человек
+# посмотрел на картинку и написал, что предыдущий капшен упустил или переврал;
+# этот текст приписывается к пользовательскому промпту, чтобы модель его учла.
+# Применяется и к обычной генерации, и к augment/full-обновлению. Пустое
+# пояснение = обычная перегенерация без подсказки. {hint} — текст пользователя.
+HINT_INSTRUCTION = (
+    "\n\nADDITIONAL GUIDANCE FROM A HUMAN who looked at this image and noted what "
+    "the previous caption missed or got wrong. Treat the following as ground truth "
+    "about the image and make sure the new caption reflects it, while still "
+    "following the exact structure above:\n{hint}"
 )

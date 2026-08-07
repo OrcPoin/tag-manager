@@ -11,6 +11,8 @@ datasets — locally, with your own vision models.
 ![Streamlit](https://img.shields.io/badge/UI-Streamlit-FF4B4B?logo=streamlit&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 
+**Current release: [v2.0.0](CHANGELOG.md)** — a major workflow, local backend, and UI update.
+
 <b>Caption generation</b><br>
 <img src="docs/screenshot-main.png" alt="Main screen" width="760">
 
@@ -53,11 +55,15 @@ Runs fully locally. All you need is your own vision model behind an OpenAI-compa
 - Tag stoplist: auto-removal of unwanted tags during generation and bulk apply to dataset
 - Trigger word across the whole dataset at once
 - Gallery with tag search, manual edit, batch re-caption of selected images and delete
+- Gallery re-caption hint: add details the model missed or described incorrectly
 - Dataset audit before training: broken files, duplicates, orphans, weak captions
 - Operation history with one-click rollback of the last bulk action
 - Trainer config export (OneTrainer JSON / kohya TOML)
 - ETA and generation speed display, browser notification on completion
 - Pause and resume on long runs
+- Unified workspace: dataset → scan → Preview → Run → Results
+- Run Center with history, parameters, summaries, and provenance
+- Background pipeline Preview that does not write to the dataset
 
 ## Why not WD14
 
@@ -169,19 +175,21 @@ The model loads and configures via the mouse; MoE and mmproj are picked up autom
 </details>
 
 <details>
-<summary>Running via llama.cpp (single binary)</summary>
+<summary>Managed llama.cpp (recommended)</summary>
 
-Lighter on resources, but you attach the model and its "eyes" yourself on the command line.
-Download [llama.cpp](https://github.com/ggerganov/llama.cpp/releases), the model GGUF and
-its `mmproj-*.gguf`, then:
+On first launch Tag Manager downloads the latest official Windows CUDA 12.4 llama.cpp
+build and CUDA runtime, records SHA256 checksums, and installs it next to the application.
+No command line or manual `llama-server.exe` selection is required.
 
-```bash
-llama-server -m model.gguf --mmproj mmproj-model.gguf --port 5000 -ngl 99
-```
+The user only needs to download a multimodal GGUF model and its `mmproj-*.gguf`, select
+their folders in the sidebar, and click **Start llama.cpp**. Existing portable
+text-generation-webui `user_data/models` and `user_data/mmproj` folders can be scanned
+directly. The external OpenAI-compatible API remains available as a fallback.
 
-- `--mmproj` — the vision projector file. Without it images won't work (see the mmproj question).
-- `--port 5000` — the port; you paste it into Tag Manager as `.../5000/v1`.
-- `-ngl 99` — layers offloaded to the GPU (99 = all; lower it if you're short on VRAM).
+**Auto** mode reads GGUF metadata and selects settings from available RAM/VRAM.
+**Manual** mode exposes context, GPU layers, KV cache K/V, Flash Attention,
+batch/ubatch, threads, load mode, reasoning/output budgets, and other runtime options.
+Settings can be saved as named backend profiles for different models.
 
 </details>
 

@@ -47,3 +47,21 @@ CLAUDE.md
 
 # --- Рабочие заметки по планам (личное, не публикуем) ---
 PLAN_STATUS.md
+
+# Development-only material (not part of releases)
+tests/
+scripts/
+UX_UI_PROPOSAL.md
+docs/ARCHITECTURE_MIGRATION_PLAN.md
+docs/UI_REQUIREMENTS_TRACEABILITY.md
+*проверка*.txt
+# Managed llama.cpp binaries, resumable downloads and runtime logs
+llama/
+llama-server.log
+llama-*.log
+live-test-processing.log
+backend_profiles.json
+taggers/
+
+# Local Agent Router credentials. The launcher may write an auth token here.
+agentrouter-config.json

@@ -15,6 +15,7 @@ from core import dataset as ds
 from core import op_history
 from ui.common import build_op, folder_picker_row
 from ui.context import logger
+from ui.design import empty_state, section_heading
 
 
 def _stage(desc: tuple, label: str, files: list) -> None:
@@ -32,7 +33,7 @@ def render_tags_tab() -> None:
     ss.setdefault("tags_pending", None)
     ss.setdefault("tags_backup", True)
 
-    st.subheader("Массовые правки тегов готового датасета")
+    section_heading("BULK EDIT", "Массовые правки captions", "Сначала preview изменений, затем безопасное применение с backup.")
 
     # Пока идёт генерация, воркер сам пишет .txt — параллельная массовая правка
     # затёрла бы результаты. Блокируем вкладку до остановки обработки.
@@ -45,7 +46,7 @@ def render_tags_tab() -> None:
         "tags_folder_input", "tags_rec", ss.tags_recursive,
         ss.tags_folder or ss.folder)
 
-    if st.button("🔍 Сканировать датасет"):
+    if st.button("Сканировать dataset", type="primary"):
         if os.path.isdir(folder):
             ss.tags_folder = folder
             ss.tags_recursive = recursive
@@ -58,7 +59,7 @@ def render_tags_tab() -> None:
 
     files = ss.tags_files
     if not files:
-        st.info("Укажите папку датасета и нажмите «Сканировать датасет».")
+        empty_state("Нет captions для массовой работы", "Выберите dataset и выполните сканирование. Изменения всегда можно предварительно проверить.")
         return
 
     # --- сводка по датасету ---

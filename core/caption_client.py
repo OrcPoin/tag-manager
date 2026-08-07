@@ -9,7 +9,6 @@ from __future__ import annotations
 import base64
 import mimetypes
 import os
-import time
 from dataclasses import dataclass
 
 import httpx
@@ -31,6 +30,12 @@ from config import (
     RETRY_REINFORCEMENT,
 )
 from core.quality import evaluate_caption
+from core.inference.interfaces import BackendHealth, BackendStatus
+from core.inference.policies import (
+    CaptionQualityPolicy,
+    RetryStopped,
+    TransportRetryPolicy,
+)
 
 # Ошибки транспорта, которые ИМЕЕТ смысл повторять с backoff.
 _RETRYABLE = (APIConnectionError, APITimeoutError, RateLimitError, InternalServerError)
@@ -44,7 +49,7 @@ class EmptyContentError(RuntimeError):
     """
 
 
-class StopRequested(RuntimeError):
+class StopRequested(RetryStopped):
     """Пользователь запросил остановку — прерываем цикл попыток немедленно."""
 
 
@@ -68,17 +73,6 @@ def _is_model_loading(exc: Exception) -> bool:
         return True
     text = str(getattr(exc, "message", "") or exc).lower()
     return "loading model" in text or "unavailable" in text
-
-
-def _sleep_interruptible(seconds: float, should_stop) -> None:
-    """Спать до `seconds`, но просыпаться раньше, если запросили остановку."""
-    waited = 0.0
-    step = 0.25
-    while waited < seconds:
-        if should_stop and should_stop():
-            raise StopRequested()
-        time.sleep(step)
-        waited += step
 
 
 def _encode_image(image_path: str) -> str:
@@ -134,6 +128,24 @@ class CaptionClient:
         except Exception:  # noqa: BLE001
             return None
 
+    def health(self) -> BackendHealth:
+        """Return a backend-neutral health snapshot for UI/diagnostics."""
+        try:
+            names = self.list_models()
+        except Exception as exc:  # noqa: BLE001
+            return BackendHealth(
+                status=BackendStatus.ERROR,
+                message=f"API недоступен: {exc}",
+                model=self.model or None,
+            )
+        active = names[0] if names else (self.model or None)
+        return BackendHealth(
+            status=BackendStatus.READY,
+            message="OpenAI-compatible API готов",
+            model=active,
+            details={"base_url": self.base_url, "models": names},
+        )
+
     def stop_generation(self) -> bool:
         """Best-effort остановка для серверов с таким эндпоинтом (нативная oobabooga).
 
@@ -142,7 +154,10 @@ class CaptionClient:
         случай настоящего Python-API oobabooga; ошибки/404 глушим.
         """
         try:
-            httpx.post(f"{self.base_url}/internal/stop-generation", timeout=5.0)
+            response = httpx.post(
+                f"{self.base_url}/internal/stop-generation", timeout=5.0
+            )
+            response.raise_for_status()
             return True
         except Exception:  # noqa: BLE001
             return False
@@ -258,60 +273,40 @@ class CaptionClient:
           * Пустой content (thinking исчерпал лимит) — сразу наверх, не ретраим.
         Между попытками и между токенами проверяем should_stop().
         """
-        last_error: Exception | None = None
-        transport_attempts = 0
-        load_waits = 0
-
-        while True:
-            if should_stop and should_stop():
-                raise StopRequested()
-            try:
-                return self._stream_once(messages, temperature, max_tokens, top_p,
-                                         should_stop=should_stop,
-                                         disable_thinking=disable_thinking)
-            except (StopRequested, EmptyContentError):
-                raise  # мимо retry — сразу наверх
-            except (InternalServerError, APIStatusError) as exc:
-                # 503 «модель грузится» — ждём терпеливо и повторяем.
-                if _is_model_loading(exc):
-                    last_error = exc
-                    load_waits += 1
-                    if load_waits > MODEL_LOAD_MAX_WAIT_RETRIES:
-                        raise RuntimeError(
-                            "Модель так и не загрузилась за отведённое время "
-                            f"({MODEL_LOAD_MAX_WAIT_RETRIES} попыток). Проверьте сервер."
-                        )
-                    if on_attempt:
-                        on_attempt(0, f"жду загрузки модели… ({load_waits})")
-                    _sleep_interruptible(MODEL_LOAD_WAIT_SECONDS, should_stop)
-                    continue
-                # 4xx — ошибки клиента: неверная модель (404), плохой запрос
-                # (400/422) и т.п. Повторять бессмысленно — ничего не изменится.
-                status = getattr(exc, "status_code", 0) or 0
-                if 400 <= status < 500:
-                    msg = str(getattr(exc, "message", "") or exc)
-                    raise RuntimeError(
-                        f"Ошибка API ({status}): {msg}. Проверьте настройки "
-                        "(имя модели, параметры)."
-                    )
-                # Прочие 5xx — как обычный транспортный сбой.
-                last_error = exc
-                transport_attempts += 1
-                if transport_attempts >= MAX_API_RETRIES:
-                    break
-                _sleep_interruptible(BACKOFF_BASE * (2 ** (transport_attempts - 1)),
-                                     should_stop)
-            except (APIConnectionError, APITimeoutError, RateLimitError) as exc:
-                last_error = exc
-                transport_attempts += 1
-                if transport_attempts >= MAX_API_RETRIES:
-                    break
-                _sleep_interruptible(BACKOFF_BASE * (2 ** (transport_attempts - 1)),
-                                     should_stop)
-
-        raise RuntimeError(
-            f"API-вызов не удался после {MAX_API_RETRIES} попыток: {last_error}"
+        policy = TransportRetryPolicy(
+            max_retries=MAX_API_RETRIES,
+            backoff_base=BACKOFF_BASE,
+            model_load_max_wait_retries=MODEL_LOAD_MAX_WAIT_RETRIES,
+            model_load_wait_seconds=MODEL_LOAD_WAIT_SECONDS,
         )
+
+        def operation():
+            return self._stream_once(
+                messages, temperature, max_tokens, top_p,
+                should_stop=should_stop,
+                disable_thinking=disable_thinking,
+            )
+
+        def is_retryable(exc: Exception) -> bool:
+            return isinstance(exc, _RETRYABLE) or (
+                isinstance(exc, APIStatusError)
+                and not (400 <= (getattr(exc, "status_code", 0) or 0) < 500)
+            )
+
+        try:
+            return policy.execute(
+                operation,
+                is_model_loading=_is_model_loading,
+                is_retryable=is_retryable,
+                status_code=lambda exc: getattr(exc, "status_code", 0) or 0,
+                should_stop=should_stop,
+                on_wait=(
+                    (lambda count, message: on_attempt(0, f"{message} ({count})"))
+                    if on_attempt else None
+                ),
+            )
+        except RetryStopped as exc:
+            raise StopRequested() from exc
 
     def generate_caption(
         self,
@@ -342,58 +337,40 @@ class CaptionClient:
         except OSError as exc:
             return CaptionResult(success=False, error=f"Не удалось прочитать изображение: {exc}")
 
-        best_caption = ""
-        best_reason = ""
-        for attempt in range(1, retries + 1):
-            if should_stop and should_stop():
-                return CaptionResult(success=False, error="Остановлено", stopped=True)
-            # Со 2-й попытки усиливаем ТОТ ЖЕ промпт (не подменяем формат),
-            # добавляя требование строже соблюсти структуру.
-            prompt = user_prompt if attempt == 1 else user_prompt + RETRY_REINFORCEMENT
+        current_attempt = 0
+
+        def generate(prompt: str, attempt: int) -> str:
+            nonlocal current_attempt
+            current_attempt = attempt
             messages = self._build_messages(system_prompt, prompt, data_url,
                                             disable_thinking=disable_thinking)
+            return self._single_call(
+                messages, temperature, max_tokens, top_p,
+                should_stop=should_stop, on_attempt=on_attempt,
+                disable_thinking=disable_thinking,
+            )
 
-            if on_attempt:
-                on_attempt(attempt, "исходный промпт" if attempt == 1
-                           else "усиленный промпт (тот же формат)")
-
-            try:
-                caption = self._single_call(messages, temperature, max_tokens, top_p,
-                                            should_stop=should_stop, on_attempt=on_attempt,
-                                            disable_thinking=disable_thinking)
-            except StopRequested:
-                return CaptionResult(success=False, error="Остановлено",
-                                     attempts=attempt, stopped=True)
-            except EmptyContentError as exc:
-                # Нехватка токенов на thinking: повторять бессмысленно —
-                # прекращаем сразу с понятным советом.
-                return CaptionResult(
-                    success=False,
-                    error=f"{exc} (текущий Max tokens={max_tokens})",
-                    attempts=attempt,
-                )
-            except Exception as exc:  # noqa: BLE001
-                return CaptionResult(
-                    success=False, error=str(exc), attempts=attempt
-                )
-
-            is_good, reason = evaluate_caption(caption)
-            if is_good:
-                return CaptionResult(
-                    success=True, caption=caption, attempts=attempt, quality_reason="ok"
-                )
-
-            # Запоминаем лучший вариант (самый длинный) на случай исчерпания попыток.
-            if len(caption) > len(best_caption):
-                best_caption = caption
-                best_reason = reason
-            if on_attempt:
-                on_attempt(attempt, f"плохой капшен: {reason}")
-
-        # Попытки исчерпаны — возвращаем лучший, но помечаем причину.
+        policy = CaptionQualityPolicy(retries, RETRY_REINFORCEMENT, evaluate_caption)
+        try:
+            outcome = policy.execute(
+                user_prompt, generate,
+                on_attempt=on_attempt,
+                should_stop=should_stop,
+            )
+        except RetryStopped:
+            return CaptionResult(success=False, error="Остановлено",
+                                 attempts=current_attempt, stopped=True)
+        except EmptyContentError as exc:
+            return CaptionResult(
+                success=False,
+                error=f"{exc} (текущий Max tokens={max_tokens})",
+                attempts=current_attempt,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return CaptionResult(success=False, error=str(exc), attempts=current_attempt)
         return CaptionResult(
             success=True,
-            caption=best_caption,
-            attempts=retries,
-            quality_reason=f"низкое качество ({best_reason})",
+            caption=outcome.caption,
+            attempts=outcome.attempts,
+            quality_reason=outcome.quality_reason,
         )

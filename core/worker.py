@@ -20,20 +20,50 @@ import threading
 import time
 from typing import Callable
 
-from core.caption_client import CaptionClient
+from core.inference.interfaces import InferenceBackend
 from core.dataset import apply_trigger, merge_captions
 from core.image_scanner import ImageTask, UpdateTask
 from core.logger import Logger
 from core.registry import DoneRegistry, prompt_signature, caption_signature
 from core.state import ProcessingState
 from core.stoplist import apply_stoplist, load_stoplist
+from core.run import finish_run_snapshot, new_run_snapshot, write_run_snapshot
+from core.pipeline import PipelineMode, PipelineOrchestrator, write_pipeline_sidecar
+from core.pipeline.models import PipelineResult, VLMResult
+from core.taggers.manager import TaggerManager
+from core.prompt_builder import build_user_prompt
 
 
 def _write_caption(txt_path: str, caption: str, trigger: str = "") -> None:
     # apply_trigger живёт в core.dataset (единый источник правды: та же логика
     # используется вкладкой «Теги» для ретрофита триггера по датасету).
-    with open(txt_path, "w", encoding="utf-8") as f:
-        f.write(apply_trigger(caption, trigger).strip() + "\n")
+    content = apply_trigger(caption, trigger).strip() + "\n"
+    folder = os.path.dirname(os.path.abspath(txt_path))
+    fd, temp_path = __import__("tempfile").mkstemp(
+        prefix=f".{os.path.basename(txt_path)}-", dir=folder, text=True
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, txt_path)
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
+def _with_hint(user_prompt: str, hint: str) -> str:
+    """Приписать к пользовательскому промпту пояснение человека (что упущено).
+
+    Пустой hint → промпт без изменений (обычная перегенерация). Единый источник
+    правды для обоих циклов воркера (_run и _run_update).
+    """
+    hint = (hint or "").strip()
+    if not hint:
+        return user_prompt
+    from config import HINT_INSTRUCTION
+    return user_prompt + HINT_INSTRUCTION.format(hint=hint)
 
 
 class CaptionWorker:
@@ -55,7 +85,7 @@ class CaptionWorker:
 
         # Снапшот параметров генерации (фиксируется на момент start()).
         self._params: dict = {}
-        self._client: CaptionClient | None = None
+        self._client: InferenceBackend | None = None
         self._logger: Logger | None = None
         self._registry: DoneRegistry | None = None
 
@@ -67,6 +97,12 @@ class CaptionWorker:
         self.current_name = ""
         self.review_task: ImageTask | None = None
         self._review_decision: tuple[str, str] | None = None
+
+        # Пояснение пользователя для следующей перегенерации (ручное ревью).
+        # Заполняется через submit_review('regenerate', hint=...), потребляется
+        # при построении user_prompt следующей генерации того же файла. Пустое =
+        # обычная перегенерация без подсказки.
+        self._regen_hint: str = ""
 
         # Обновление (Фаза 5).
         self._update_tasks: list[UpdateTask] = []
@@ -81,6 +117,7 @@ class CaptionWorker:
 
         # Таймстемп старта (для расчёта ETA).
         self._start_ts: float = 0.0
+        self._run_snapshot = None
 
         # Стоп-лист тегов (загружается при start).
         self._stoplist: set[str] = set()
@@ -95,7 +132,7 @@ class CaptionWorker:
         params: dict,
         logger: Logger,
         registry: DoneRegistry,
-        client: CaptionClient,
+        client: InferenceBackend,
     ) -> None:
         """Запустить обработку списка задач в фоновом потоке."""
         if self.is_alive():
@@ -105,6 +142,9 @@ class CaptionWorker:
         self._logger = logger
         self._registry = registry
         self._client = client
+        self._run_snapshot = new_run_snapshot(folder, params, client)
+        self.state.run_id = self._run_snapshot.run_id
+        write_run_snapshot(folder, self._run_snapshot)
 
         self._stop_event.clear()
         self._pause_event.clear()
@@ -134,7 +174,7 @@ class CaptionWorker:
         params: dict,
         logger: Logger,
         registry: DoneRegistry,
-        client: CaptionClient,
+        client: InferenceBackend,
     ) -> None:
         """Продолжить уже загруженный в state прогресс (folder/tasks/index заданы)."""
         if self.is_alive():
@@ -143,6 +183,11 @@ class CaptionWorker:
         self._logger = logger
         self._registry = registry
         self._client = client
+        # Resumed progress gets a new snapshot only when the old run metadata is
+        # unavailable; the queue/index itself remains the source of recovery truth.
+        self._run_snapshot = new_run_snapshot(self.state.folder, params, client)
+        self.state.run_id = self._run_snapshot.run_id
+        write_run_snapshot(self.state.folder, self._run_snapshot)
 
         self._stop_event.clear()
         self._pause_event.clear()
@@ -199,11 +244,19 @@ class CaptionWorker:
             self.review_task = None
             self.status_msg = "⏹️ Остановлено"
         self.state.save_progress()
+        self._finish_run("stopped")
         if self._logger:
             self._logger.info("Остановлено пользователем")
 
-    def submit_review(self, decision: str, edited_caption: str = "") -> None:
-        """Решение ручного ревью: 'accept' | 'edit' | 'skip' | 'regenerate'."""
+    def submit_review(self, decision: str, edited_caption: str = "", hint: str = "") -> None:
+        """Решение ручного ревью: 'accept' | 'edit' | 'skip' | 'regenerate'.
+
+        hint — пояснение пользователя (что модель упустила) для перегенерации;
+        учитывается только при decision == 'regenerate'. Пустое = обычная
+        перегенерация без подсказки.
+        """
+        if decision == "regenerate":
+            self._regen_hint = hint or ""
         self._review_decision = (decision, edited_caption)
         self._review_event.set()
 
@@ -240,6 +293,8 @@ class CaptionWorker:
                 "update_deferred": self._update_deferred,
                 "update_diffs": list(self._update_diffs),
                 "start_ts": self._start_ts,
+                "run_id": self._run_snapshot.run_id if self._run_snapshot else "",
+                "elapsed_seconds": max(0.0, time.time() - self._start_ts) if self._start_ts else 0.0,
             }
 
     # ------------------------------------------------------------------ #
@@ -257,6 +312,15 @@ class CaptionWorker:
 
     def _run(self) -> None:
         p = self._params
+        pipeline_mode = PipelineMode(p.get("pipeline_mode", PipelineMode.DESCRIPTION_ONLY))
+        pipeline_taggers = []
+        if p.get("pipeline_tagger_ids"):
+            manager = TaggerManager(p.get("tagger_root", "taggers"))
+            for tagger_id in p["pipeline_tagger_ids"]:
+                try:
+                    pipeline_taggers.append(manager.create(tagger_id))
+                except Exception as exc:  # optional provider must not break VLM-only
+                    self._log(f"tagger {tagger_id} недоступен: {exc}", "warning")
         try:
             while not self._stop_event.is_set() and not self.state.is_finished():
                 # Пауза: ждём resume/stop, ничего не генерируя.
@@ -278,10 +342,35 @@ class CaptionWorker:
                 def on_attempt(n, msg, _name=task.name):
                     self._log(f"[{_name}] попытка {n}: {msg}")
 
+                # Пояснение пользователя: из ручного ревью (перегенерация) либо
+                # из батч-параметра (галерея). Потребляется один раз.
+                hint = self._regen_hint or p.get("regen_hint", "")
+                self._regen_hint = ""
+                user_prompt = _with_hint(p["user_prompt"], hint)
+
+                tagger_results = []
+                if pipeline_taggers and pipeline_mode != PipelineMode.DESCRIPTION_ONLY:
+                    for tagger in pipeline_taggers:
+                        tagger_results.append(tagger.predict(task.image_path, top_k=int(p.get("pipeline_top_k", 128))))
+                    if pipeline_mode in (PipelineMode.TAGS_TO_VLM_CONTEXT, PipelineMode.CUSTOM):
+                        user_prompt = build_user_prompt(user_prompt, tagger_results)
+                    if pipeline_mode == PipelineMode.TAGS_ONLY:
+                        tags = []
+                        for item in tagger_results:
+                            tags.extend(tag.name for tag in item.tags if item.success)
+                        _write_caption(task.txt_path, ", ".join(dict.fromkeys(tags)), p.get("trigger_word", ""))
+                        task.caption = ", ".join(dict.fromkeys(tags))
+                        write_pipeline_sidecar(task.image_path, PipelineResult(
+                            True, final_caption=task.caption, tagger_results=tagger_results,
+                        ))
+                        task.status = "done"
+                        self.state.advance(); self.state.save_progress()
+                        continue
+
                 result = self._client.generate_caption(
                     image_path=task.image_path,
                     system_prompt=p["system_prompt"],
-                    user_prompt=p["user_prompt"],
+                    user_prompt=user_prompt,
                     temperature=p["temperature"],
                     max_tokens=p["max_tokens"],
                     top_p=p["top_p"],
@@ -309,6 +398,15 @@ class CaptionWorker:
 
                 task.caption = result.caption
 
+                if tagger_results:
+                    write_pipeline_sidecar(task.image_path, PipelineResult(
+                        True, final_caption=result.caption, tagger_results=tagger_results,
+                        vlm_result=VLMResult(True, text=result.caption,
+                                             attempts=getattr(result, "attempts", 0)),
+                        warnings=[str(item.metadata.get("provider_warning")) for item in tagger_results
+                                  if item.metadata.get("provider_warning")],
+                    ))
+
                 # Ручное ревью: показать файл и ждать решения пользователя.
                 if p["manual_review"]:
                     if self._handle_review(task):
@@ -324,14 +422,33 @@ class CaptionWorker:
                 self._log("Обработка завершена")
                 with self._lock:
                     self.finished = True
+                self._finish_run("completed")
             self.state.save_progress()
         except Exception as exc:  # noqa: BLE001 — поток не должен молча умирать
             self._log(f"Сбой воркера: {exc}", "error")
             self._set_status(f"Сбой: {exc}")
+            self._finish_run("failed")
         finally:
             with self._lock:
                 self.running = False
                 self.paused = False
+
+    def _finish_run(self, status: str) -> None:
+        if self._run_snapshot is None:
+            return
+        self._run_snapshot = finish_run_snapshot(self._run_snapshot, status, {
+            "total": self.state.total,
+            "done": self.state.done_count,
+            "processed": self.state.processed,
+            "skipped": self.state.skipped,
+            "errors": self.state.errors,
+            "update_total": self._update_total,
+            "update_done": self._update_done,
+            "update_skipped": self._update_skipped,
+            "update_errors": self._update_errors,
+            "review_deferred": self._update_deferred,
+        })
+        write_run_snapshot(self._run_snapshot.folder, self._run_snapshot)
 
     def _commit(self, task: ImageTask, caption: str, result) -> None:
         """Записать капшен, отметить в реестре, продвинуть очередь."""
@@ -431,7 +548,7 @@ class CaptionWorker:
         params: dict,
         logger: Logger,
         registry: DoneRegistry,
-        client: CaptionClient,
+        client: InferenceBackend,
     ) -> None:
         """Запустить обновление существующих капшенов в фоновом потоке."""
         if self.is_alive():
@@ -568,10 +685,16 @@ class CaptionWorker:
                 # Внутренний цикл: «перегенерировать» из ревью возвращает нас сюда.
                 stop_all = False
                 while True:
+                    # Пояснение пользователя: из ручного ревью (перегенерация) либо
+                    # из батч-параметра. Потребляется один раз за генерацию.
+                    hint = self._regen_hint or p.get("regen_hint", "")
+                    self._regen_hint = ""
+                    eff_prompt = _with_hint(user_prompt, hint)
+
                     result = self._client.generate_caption(
                         image_path=task.image_path,
                         system_prompt=p["system_prompt"],
-                        user_prompt=user_prompt,
+                        user_prompt=eff_prompt,
                         temperature=p["temperature"],
                         max_tokens=p["max_tokens"],
                         top_p=p["top_p"],
@@ -681,8 +804,7 @@ class CaptionWorker:
         except OSError:
             pass
 
-        with open(task.txt_path, "w", encoding="utf-8") as f:
-            f.write(final.strip() + "\n")
+        _write_caption(task.txt_path, final, "")
 
         self._registry.mark_done(
             task.image_path,

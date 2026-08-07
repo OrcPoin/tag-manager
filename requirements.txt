@@ -2,3 +2,5 @@
 streamlit>=1.49
 openai>=1.0
 pillow>=10.0
+# GPU build also contains CPUExecutionProvider; CUDA DLLs remain an opt-in UI download.
+onnxruntime-gpu>=1.23,<1.24
