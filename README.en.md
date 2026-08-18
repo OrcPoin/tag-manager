@@ -43,13 +43,16 @@ human decision. Resources contains GGUF/mmproj models, compatibility checks, and
 
 ## Install
 
-Python 3.11+ and Node.js 20+ are required. On Windows, build once and run
-`Start Tag Manager.bat`:
+Python 3.11+ and Node.js 20+ are required. On Windows, install the Python dependencies and
+run `Start Tag Manager.bat` — it builds the UI automatically on first launch:
 
 ```powershell
 python -m pip install -r requirements.txt
-cd frontend; npm ci; npm run build; cd ..
 ```
+
+You can also build the UI ahead of time (or rebuild it) with `build-frontend.bat` or
+`cd frontend; npm ci; npm run build`. To update, run `update.bat`: it pulls changes, updates
+dependencies, and rebuilds the UI.
 
 Multimodal GGUF and `mmproj` files are not bundled. Select them in Resources; CUDA requires
 compatible NVIDIA drivers. Scanning, gallery editing, health, and review also work without a

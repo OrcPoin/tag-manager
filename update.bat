@@ -22,7 +22,7 @@ if not exist ".git" (
 
 echo === Обновление Tag Manager ===
 echo.
-echo [1/2] Тяну изменения из GitHub...
+echo [1/3] Тяну изменения из GitHub...
 git pull
 if errorlevel 1 (
     echo.
@@ -32,11 +32,20 @@ if errorlevel 1 (
 )
 
 echo.
-echo [2/2] Обновляю зависимости...
+echo [2/3] Обновляю зависимости Python...
 python -m pip install -r requirements.txt
 
 echo.
-echo === Готово. Запускайте run.bat ===
+echo [3/3] Пересобираю интерфейс...
+call "%~dp0build-frontend.bat"
+if errorlevel 1 (
+    echo.
+    echo [!] Интерфейс не пересобрался. Установите Node.js 20+ и запустите обновление снова.
+    goto :end
+)
+
+echo.
+echo === Готово. Запускайте "Start Tag Manager.bat" ===
 
 :end
 echo.

@@ -1,5 +1,3 @@
-# width="stretch" (замена use_container_width) требует Streamlit >= 1.49
-streamlit>=1.49
 openai>=1.0
 pillow>=10.0
 fastapi>=0.115,<1
