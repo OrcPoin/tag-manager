@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 import os
 
 from core.models.gguf import GGUFMetadata, read_gguf_metadata
@@ -38,6 +39,27 @@ def scan_model_library(
     mmproj_roots: tuple[str, ...] = (),
     recursive: bool = True,
 ) -> ModelLibrary:
+    """Return the model inventory without rescanning multi-GB libraries on UI reruns.
+
+    Streamlit executes the whole page after every widget edit.  GGUF discovery and
+    metadata parsing are stable until the user installs/removes a model, so cache
+    them and let the UI explicitly invalidate the inventory when that happens.
+    """
+    normalized_root = os.path.abspath(root) if root else ""
+    normalized_projectors = tuple(
+        os.path.abspath(path) if path else "" for path in mmproj_roots
+    )
+    return _scan_model_library_cached(
+        normalized_root, normalized_projectors, bool(recursive)
+    )
+
+
+@lru_cache(maxsize=16)
+def _scan_model_library_cached(
+    root: str,
+    mmproj_roots: tuple[str, ...],
+    recursive: bool,
+) -> ModelLibrary:
     root = os.path.abspath(root)
     paths = _gguf_paths(root, recursive)
     projector_paths = _gguf_paths(root, recursive, projector_only=True)
@@ -68,6 +90,11 @@ def scan_model_library(
         except (OSError, ValueError) as exc:
             errors.append(f"{path}: {exc}")
     return ModelLibrary(root, tuple(entries), tuple(errors))
+
+
+def clear_model_library_cache() -> None:
+    """Invalidate cached inventories after model installation/removal."""
+    _scan_model_library_cached.cache_clear()
 
 
 def _gguf_paths(root: str, recursive: bool, projector_only: bool = False) -> list[str]:

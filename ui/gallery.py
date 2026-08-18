@@ -307,6 +307,12 @@ def render_gallery_tab() -> None:
     ss.setdefault("gallery_regen", set())   # пути, отданные на перегенерацию
     ss.setdefault("gallery_edit_nonce", 0)  # сброс text_area редактора после refresh
 
+    # Results открываются из главного workflow уже с выбранным dataset. Подхватываем
+    # его автоматически, чтобы пользователь не выбирал ту же папку второй раз.
+    if (ss.get("folder") and os.path.isdir(ss.folder)
+            and not ss.gallery_all and not ss.get("gallery_choose_folder", False)):
+        _scan(ss.folder, bool(ss.get("recursive", False)))
+
     # Если галерея запускала перегенерацию и воркер закончил — капшены в памяти
     # (ss.gallery_all) устарели: воркер записал новый .txt на диск, а список мы
     # читали один раз при скане. Подтягиваем свежие капшены только для затронутых
@@ -330,19 +336,28 @@ def render_gallery_tab() -> None:
     section_heading("RESULTS", "Галерея captions", "Изображение — главный объект; фильтры и массовые действия появляются только по контексту.")
 
     ss.setdefault("gallery_folder_input", ss.gallery_folder or ss.folder)
-    c = st.columns([5, 1, 1, 1], vertical_alignment="bottom")
-    folder = c[0].text_input("Папка датасета", key="gallery_folder_input")
-    c[1].button("📁 Обзор", key="gallery_browse", width="stretch",
-                on_click=browse_into, args=("gallery_folder_input",))
-    recursive = c[2].checkbox("Рекурсивно", ss.gallery_recursive,
-                              key="gallery_recursive_cb")
-    if c[3].button("Сканировать", width="stretch", type="primary"):
-        if os.path.isdir(folder):
-            _scan(folder, recursive)
-            st.toast(f"Изображений: {len(ss.gallery_all)}")
+    same_dataset = bool(ss.folder and ss.gallery_folder == ss.folder)
+    if same_dataset and not ss.get("gallery_choose_folder", False):
+        context_col, action_col = st.columns([5, 1], vertical_alignment="center")
+        context_col.info(f"Текущий dataset: {ss.folder} · {len(ss.gallery_all)} изображений")
+        if action_col.button("Сменить", key="gallery_change_dataset"):
+            ss.gallery_choose_folder = True
             st.rerun()
-        else:
-            st.error("Папка не найдена")
+    else:
+        c = st.columns([5, 1, 1, 1], vertical_alignment="bottom")
+        folder = c[0].text_input("Папка датасета", key="gallery_folder_input")
+        c[1].button("📁 Обзор", key="gallery_browse", width="stretch",
+                    on_click=browse_into, args=("gallery_folder_input",))
+        recursive = c[2].checkbox("Рекурсивно", ss.gallery_recursive,
+                                  key="gallery_recursive_cb")
+        if c[3].button("Сканировать", width="stretch", type="primary"):
+            if os.path.isdir(folder):
+                _scan(folder, recursive)
+                ss.gallery_choose_folder = False
+                st.toast(f"Изображений: {len(ss.gallery_all)}")
+                st.rerun()
+            else:
+                st.error("Папка не найдена")
 
     if not ss.gallery_all:
         empty_state("Галерея пока пуста", "Выберите dataset и просканируйте его — изображения появятся здесь с captions и статусами.")

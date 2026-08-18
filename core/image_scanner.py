@@ -6,7 +6,6 @@ import os
 from dataclasses import dataclass, field
 
 from config import (
-    MIN_TXT_SIZE_BYTES,
     MODE_ALL,
     MODE_ONLY_MISSING,
     MODE_RESUME,
@@ -38,10 +37,15 @@ def _txt_path_for(image_path: str) -> str:
 
 
 def _has_valid_caption(txt_path: str) -> bool:
-    """True, если .txt существует и его размер больше порога."""
+    """True, если рядом есть непустой caption.
+
+    Минимальная длина относится к quality checks, но не к scope: короткий
+    пользовательский caption нельзя молча считать отсутствующим и перезаписывать.
+    """
     try:
-        return os.path.getsize(txt_path) > MIN_TXT_SIZE_BYTES
-    except OSError:
+        with open(txt_path, "r", encoding="utf-8-sig") as file:
+            return bool(file.read().strip())
+    except (OSError, UnicodeError):
         return False
 
 
@@ -87,6 +91,14 @@ def build_task_list(
     только картинки, которые это приложение ещё НЕ обрабатывало (или картинка
     изменилась с тех пор). Наличие чужого старого .txt при этом игнорируется.
     """
+    legacy_modes = {
+        "caption": MODE_ONLY_MISSING,
+        "missing": MODE_ONLY_MISSING,
+        "all": MODE_ALL,
+        "skip_processed": MODE_SKIP_PROCESSED,
+    }
+    mode = legacy_modes.get(mode, mode)
+
     if mode == MODE_RESUME and registry is None:
         registry = DoneRegistry(folder)
 

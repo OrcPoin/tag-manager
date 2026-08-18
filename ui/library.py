@@ -10,16 +10,18 @@ from ui.design import empty_state, section_heading
 def render_library() -> None:
     ss = st.session_state
     section_heading("РЕСУРСЫ", "Профили и модели")
+    if ss.get("library_section") in {"Профили", "Модели"}:
+        del ss["library_section"]
     section = st.segmented_control(
-        "Тип ресурса", ["Профили", "Модели"], default="Профили",
+        "Тип ресурса", ["Профили описания", "Модели тегов"], default="Профили описания",
         label_visibility="collapsed", key="library_section",
     )
-    if section == "Модели":
+    if section == "Модели тегов":
         from ui.taggers import render_taggers_tab
         render_taggers_tab()
         return
 
-    st.markdown("### Профили")
+    st.markdown("### Профили описания")
     for name, preset in ss.presets.items():
         selected = name == ss.get("preset_name")
         with st.expander(f"{'✓ ' if selected else ''}{name}"):

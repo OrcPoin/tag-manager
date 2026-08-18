@@ -98,77 +98,28 @@ def render_review(task, preview_col, caption_col) -> None:
             st.rerun()
 
 
-def render_generation_tab() -> bool:
+def render_generation_tab(*, show_source: bool = True) -> bool:
     """Отрисовать вкладку «Генерация». Возврат: нужно ли поллинг-rerun."""
     ss = st.session_state
     worker = ss.worker
 
-    # --- Выбор папки и режима ---
-    section_heading("ШАГ 1", "Что обработать")
-    col_f1, col_f2 = st.columns([5, 1], vertical_alignment="bottom")
-    with col_f1:
-        ss.folder = st.text_input("Путь к папке с изображениями", ss.folder)
-    with col_f2:
-        if st.button("📁 Обзор", width="stretch"):
-            picked = pick_folder(ss.folder)
-            if picked:
-                ss.folder = picked
-                st.rerun()
-            else:
-                st.toast("Диалог недоступен — введите путь вручную")
-
-    ss.recursive = st.checkbox("Включать изображения из подпапок", ss.recursive)
-    mode_presentations = {
-        config.MODE_RESUME: ("Продолжить", "Обработать только то, что приложение ещё не завершило."),
-        config.MODE_ONLY_MISSING: ("Заполнить пропуски", "Создать подписи только там, где ещё нет текстового файла."),
-        config.MODE_UPDATE: ("Умно обновить", "Освежить устаревшие результаты с защитой ручных правок."),
-        config.MODE_ALL: ("Пересоздать всё", "Полностью перезаписать подписи для всех изображений."),
-        config.MODE_SKIP_PROCESSED: ("По дате файлов", "Пропустить подписи, которые новее изображения."),
-    }
-    mode_columns = st.columns(len(config.UI_MODES))
-    st.markdown('<div class="tm-mode-picker">', unsafe_allow_html=True)
-    for column, mode in zip(mode_columns, config.UI_MODES):
-        title, description = mode_presentations[mode]
-        selected = ss.mode == mode
-        with column:
-            if st.button(title, key=f"mode_card_{mode}", help=description,
-                         width="stretch", type="primary" if selected else "secondary",
-                         disabled=False):
-                ss.mode = mode
-                if not selected:
+    # Dataset и назначение результата находятся на главном экране. Этот блок
+    # остаётся только для совместимых точек входа, где рабочего shell нет.
+    if show_source:
+        section_heading("ШАГ 1", "Что обработать")
+        col_f1, col_f2 = st.columns([5, 1], vertical_alignment="bottom")
+        with col_f1:
+            ss.folder = st.text_input("Путь к папке с изображениями", ss.folder)
+        with col_f2:
+            if st.button("📁 Обзор", width="stretch"):
+                picked = pick_folder(ss.folder)
+                if picked:
+                    ss.folder = picked
                     st.rerun()
-            st.caption(description)
-    st.markdown('</div>', unsafe_allow_html=True)
+                else:
+                    st.toast("Диалог недоступен — введите путь вручную")
 
-    with st.expander("Состав результата", expanded=False):
-        from core.taggers.registry import TAGGER_SPECS
-        installed = [key for key, spec in TAGGER_SPECS.items()
-                     if ss.tagger_manager.installed(key)]
-        st.caption("Выберите, какой результат должен получить каждый файл.")
-        pipeline_choices = {
-            "description_only": ("Описание", "Модель создаёт естественное описание изображения."),
-            "tags_only": ("Только теги", "Модель распознавания создаёт компактный набор тегов."),
-            "tags_and_description": ("Теги + описание", "Сохранить оба вида результата."),
-            "tags_to_vlm_context": ("Теги помогают описанию", "Распознанные теги помогают точнее описать сцену."),
-        }
-        pipeline_columns = st.columns(len(pipeline_choices))
-        for column, (value, (label, help_text)) in zip(pipeline_columns, pipeline_choices.items()):
-            active = ss.get("pipeline_mode", "description_only") == value
-            with column:
-                if st.button(label, key=f"pipeline_choice_{value}", width="stretch",
-                             type="primary" if active else "secondary",
-                             help=help_text):
-                    ss.pipeline_mode = value
-                    if not active:
-                        st.rerun()
-        ss.pipeline_tagger_ids = st.multiselect(
-            "Модели распознавания тегов", installed,
-            default=ss.get("pipeline_tagger_ids", []),
-            help="Показываются только установленные модели. Установка находится в Библиотеке.",
-        )
-        if ss.get("show_advanced", False):
-            st.number_input("Максимальное количество тегов", 1, 1000,
-                            int(ss.get("pipeline_top_k", 128)), key="pipeline_top_k")
+        ss.recursive = st.checkbox("Включать изображения из подпапок", ss.recursive)
 
     # --- Настройки обновления (только для MODE_UPDATE) ---
     if ss.mode == config.MODE_UPDATE:
@@ -222,25 +173,26 @@ def render_generation_tab() -> bool:
                 ss.upd_filter_all = st.checkbox("Все файлы",
                                                 ss.get("upd_filter_all", False))
 
-    if st.button("🔍 Сканировать"):
-        if os.path.isdir(ss.folder):
-            ss.scan_info = scan_summary(ss.folder, ss.recursive)
-            reg = get_registry()
-            imgs = find_images(ss.folder, ss.recursive)
-            ss.scan_info["done_by_app"] = sum(1 for p in imgs if reg.is_done(p))
-        else:
-            ss.scan_info = None
-            st.error("Папка не найдена")
+    if show_source:
+        if st.button("🔍 Сканировать"):
+            if os.path.isdir(ss.folder):
+                ss.scan_info = scan_summary(ss.folder, ss.recursive)
+                reg = get_registry()
+                imgs = find_images(ss.folder, ss.recursive)
+                ss.scan_info["done_by_app"] = sum(1 for p in imgs if reg.is_done(p))
+            else:
+                ss.scan_info = None
+                st.error("Папка не найдена")
 
-    if ss.scan_info:
-        s = ss.scan_info
-        st.info(f"Найдено изображений: **{s['total']}**  ·  "
-                f"с капшенами: **{s['with_caption']}**  ·  "
-                f"без капшенов: **{s['missing']}**  ·  "
-                f"сделано этим приложением: **{s.get('done_by_app', 0)}**")
+        if ss.scan_info:
+            s = ss.scan_info
+            st.info(f"Найдено изображений: **{s['total']}**  ·  "
+                    f"с капшенами: **{s['with_caption']}**  ·  "
+                    f"без капшенов: **{s['missing']}**  ·  "
+                    f"сделано этим приложением: **{s.get('done_by_app', 0)}**")
 
     # --- Пресеты и промпты ---
-    section_heading("ШАГ 2", "Как должен выглядеть результат")
+    section_heading("РЕЗУЛЬТАТ", "Профиль описания")
     preset_names = list(ss.presets.keys())
     col_p1, col_p2, col_p3 = st.columns([3, 1, 1])
     with col_p1:
@@ -251,6 +203,8 @@ def render_generation_tab() -> bool:
             ss.preset_name = chosen
             ss.system_prompt = ss.presets[chosen]["system"]
             ss.user_prompt = ss.presets[chosen]["user"]
+            from core import app_settings
+            app_settings.save_settings_if_changed(ss)
             st.rerun()
 
     ss.system_prompt = st.text_area("System Prompt", ss.system_prompt, height=90)
@@ -275,6 +229,8 @@ def render_generation_tab() -> bool:
                 presets_mod.save_preset(new_preset_name, ss.system_prompt, ss.user_prompt)
                 ss.presets = presets_mod.load_presets()
                 ss.preset_name = new_preset_name
+                from core import app_settings
+                app_settings.save_settings_if_changed(ss)
                 st.success(f"Пресет «{new_preset_name}» сохранён")
             except ValueError as e:
                 st.error(str(e))
@@ -292,7 +248,7 @@ def render_generation_tab() -> bool:
     # ----------------------------------------------------------------------- #
     # Управление обработкой
     # ----------------------------------------------------------------------- #
-    section_heading("ШАГ 3", "Запуск обработки")
+    section_heading("ЗАПУСК", "Проверка и начало обработки")
 
     snap = worker.snapshot()
     running = snap["running"]
@@ -300,19 +256,19 @@ def render_generation_tab() -> bool:
     paused = snap["paused"]
     has_review = snap["has_review"]
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     with c1:
         start_clicked = st.button("Начать обработку", width="stretch",
                                   disabled=running or preview_busy, type="primary")
     with c2:
         pause_clicked = st.button("⏸️ Пауза", width="stretch",
-                                  disabled=not running or paused or has_review)
+                                  disabled=not running or paused or has_review) if show_source else False
     with c3:
         resume_clicked = st.button("⏵️ Возобновить", width="stretch",
-                                   disabled=not running or not paused)
+                                   disabled=not running or not paused) if show_source else False
     with c4:
         stop_clicked = st.button("⏹️ Остановить", width="stretch",
-                                 disabled=not running)
+                                 disabled=not running) if show_source else False
 
     if start_clicked:
         ss._notified = False

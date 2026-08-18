@@ -1,5 +1,28 @@
 # Changelog
 
+## [3.0.0] - 2026-08-18
+
+### Added
+
+- Added a native single-window Windows launcher with tray, notifications, autostart, and persistent window state.
+- Added a React/Vite workspace and a local FastAPI service with project, run, review, recipe, resource, and system APIs.
+- Added dataset projects, automatic run planning, expert configuration, preview runs, and resumable execution.
+- Added visual search using local image embeddings with scene, composition, object, pose, and text-query modes.
+- Added gallery bulk editing, feedback-driven regeneration, project health, storage retention, and run comparison.
+- Added a manual review queue and durable per-project event history.
+- Added PyInstaller and Inno Setup packaging definitions.
+
+### Changed
+
+- Replaced the Streamlit-first workflow with a desktop-first project workspace.
+- Reworked persistence around project sidecars, an indexed project registry, atomic events, and reproducible run snapshots.
+- Replaced both README files and all published screenshots for the new product flow.
+
+### Fixed
+
+- Improved interrupted-run reconciliation, idempotent commands, safe shutdown, and recovery of remaining work.
+- Improved local model, tagger, hardware, and visual-search diagnostics.
+
 ## [2.0.0] - 2026-08-07
 
 ### Added
@@ -33,4 +56,3 @@
 - Fixed GGUF and TOML escaping.
 - Fixed gallery provenance tracking.
 - Fixed dataset folder selection after a Streamlit widget was created.
-

@@ -1,0 +1,7 @@
+[
+  {"id":"mock-r01","schema_version":1,"ts":"2026-08-10T11:00:00+03:00","type":"model.loading","project_id":"mock-project","run_id":"mock-run","message":"Модель загружается","payload":{"state":"loading"}},
+  {"id":"mock-r02","schema_version":1,"ts":"2026-08-10T11:01:00+03:00","type":"run.paused","project_id":"mock-project","run_id":"mock-run","message":"Обработка приостановлена","payload":{"status":"paused"}},
+  {"id":"mock-r03","schema_version":1,"ts":"2026-08-10T11:02:00+03:00","type":"run.recovered","project_id":"mock-project","run_id":"mock-run","message":"Запуск восстановлен после перезапуска и поставлен на паузу","payload":{"status":"paused"}},
+  {"id":"mock-r04","schema_version":1,"ts":"2026-08-10T11:03:00+03:00","type":"review.queued","project_id":"mock-project","run_id":"mock-run","message":"Результат добавлен в очередь проверки","payload":{"review_item_id":"mock-review","status":"pending"}},
+  {"id":"mock-r05","schema_version":1,"ts":"2026-08-10T11:04:00+03:00","type":"run.failed","project_id":"mock-project","run_id":"mock-run","message":"Не удалось продолжить обработку","payload":{"status":"failed","recovery_action":"Проверьте доступность модели"}}
+]

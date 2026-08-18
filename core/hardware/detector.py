@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import ctypes
 import os
 import subprocess
@@ -77,9 +78,17 @@ def _nvidia_gpus() -> tuple[GPUInfo, ...]:
     return tuple(gpus)
 
 
+@lru_cache(maxsize=1)
 def detect_hardware() -> HardwareInfo:
+    """Detect mostly-static hardware once instead of running nvidia-smi per rerun."""
     logical = os.cpu_count() or 1
     # Dependency-free approximation; benchmark tuner can refine it later.
     physical = max(1, logical // 2) if logical > 4 else logical
     total, available = _memory()
     return HardwareInfo(logical, physical, total, available, _nvidia_gpus())
+
+
+def refresh_hardware() -> HardwareInfo:
+    """Refresh dynamic free-memory figures before an explicit diagnostic/tuning pass."""
+    detect_hardware.cache_clear()
+    return detect_hardware()

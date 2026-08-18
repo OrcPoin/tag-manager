@@ -6,6 +6,9 @@ __pycache__/
 .eggs/
 build/
 dist/
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
 .venv/
 venv/
 env/
@@ -47,9 +50,17 @@ CLAUDE.md
 
 # --- Рабочие заметки по планам (личное, не публикуем) ---
 PLAN_STATUS.md
+FINAL_IMPLEMENTATION_PLAN.md
+UX_INTERFACE_IMPROVEMENT_PLAN.md
+Phase X*.txt
+Интерфейс*.txt
+.tmp-check/
+.tmp-edge/
 
 # Development-only material (not part of releases)
 tests/
+frontend/src/**/*.test.*
+frontend/src/test/
 scripts/
 UX_UI_PROPOSAL.md
 docs/ARCHITECTURE_MIGRATION_PLAN.md
@@ -61,6 +72,7 @@ llama-server.log
 llama-*.log
 live-test-processing.log
 backend_profiles.json
+.tagmanager-service/
 taggers/
 
 # Local Agent Router credentials. The launcher may write an auth token here.

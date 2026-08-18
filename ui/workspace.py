@@ -7,18 +7,118 @@
 from __future__ import annotations
 
 import os
+import time
 
 import streamlit as st
+import config
 
 from core import app_settings
 from core.image_scanner import find_images, scan_summary
 from core.inference.installer import discover_gguf
-from core.models.library import scan_model_library
-from ui.common import browse_into
+from core.models.library import clear_model_library_cache, scan_model_library
+from ui.common import browse_into, fmt_duration
 from ui.context import get_registry
 from ui.context import get_client, get_params
 from ui.viewmodels import sync_dataset_context, workspace_view
 from ui.design import mode_banner, section_heading
+
+
+def _render_active_run(snapshot: dict) -> None:
+    """Focused run cockpit: only live information and immediate actions."""
+    ss = st.session_state
+    worker = ss.worker
+    total = int(snapshot.get("update_total") or snapshot.get("total") or 0)
+    done = int(snapshot.get("update_done") or snapshot.get("done") or 0)
+    elapsed = float(snapshot.get("elapsed_seconds") or 0.0)
+    average = elapsed / done if done else 0.0
+    remaining = max(0, total - done) * average if average else 0.0
+
+    section_heading(
+        "ТРЕБУЕТСЯ РЕШЕНИЕ" if snapshot.get("has_review") else "ВЫПОЛНЯЕТСЯ",
+        "Проверьте текущую подпись" if snapshot.get("has_review") else "Генерация подписей",
+        "Настройки зафиксированы до конца запуска. Здесь остаётся только ход работы и управление.",
+    )
+
+    stage = "Пауза" if snapshot.get("paused") else (
+        "Ожидает проверки" if snapshot.get("has_review") else "Генерация"
+    )
+    metrics = st.columns(5)
+    metrics[0].metric("Этап", stage)
+    metrics[1].metric("Готово", f"{done} / {total}" if total else "—")
+    metrics[2].metric("Ошибки", int(snapshot.get("errors", 0) or 0))
+    metrics[3].metric("Прошло", fmt_duration(elapsed))
+    metrics[4].metric("Осталось", fmt_duration(remaining) if remaining else "—")
+    st.progress(done / total if total else 0.0, text=f"Общий прогресс · {done} из {total}")
+
+    current = worker.state.current_task()
+    if snapshot.get("has_review"):
+        from ui.generation import render_review
+        review = worker.get_review()
+        if review is not None:
+            preview_col, caption_col = st.columns([2, 3])
+            render_review(review, preview_col, caption_col)
+    else:
+        visual, activity = st.columns([2, 3])
+        with visual:
+            if current and os.path.isfile(current.image_path):
+                st.image(current.image_path, width="stretch")
+            else:
+                st.info("Изображение подготавливается")
+        with activity:
+            st.markdown("### Сейчас")
+            st.markdown(f"**{snapshot.get('current_name') or 'Подготовка первого файла'}**")
+            st.info(snapshot.get("status_msg") or "Подготовка…")
+            if average:
+                st.caption(f"Среднее время: {fmt_duration(average)} на изображение")
+            st.caption(f"Запуск: {snapshot.get('run_id') or '—'}")
+
+    controls = st.columns([1, 1, 1, 3])
+    if controls[0].button("Продолжить", width="stretch",
+                          disabled=not snapshot.get("paused")):
+        worker.resume()
+        st.rerun()
+    if controls[1].button("Пауза", width="stretch",
+                          disabled=snapshot.get("paused") or snapshot.get("has_review")):
+        worker.pause()
+        st.rerun()
+    if controls[2].button("Остановить", width="stretch"):
+        worker.stop()
+        st.rerun()
+    controls[3].caption(
+        "Пауза прерывает текущую генерацию; после продолжения этот файл будет создан заново."
+    )
+
+
+def _render_finished_run(snapshot: dict) -> None:
+    """Completion state with outcome and next actions, not stale setup controls."""
+    ss = st.session_state
+    errors = int(snapshot.get("errors", 0) or 0)
+    total = int(snapshot.get("update_total") or snapshot.get("total") or 0)
+    done = int(snapshot.get("update_done") or snapshot.get("done") or 0)
+    section_heading(
+        "ЗАВЕРШЕНО С ОШИБКАМИ" if errors else "ГОТОВО",
+        "Обработка завершена",
+        "Проверьте результат или подготовьте следующий запуск.",
+    )
+    summary = st.columns(4)
+    summary[0].metric("Обработано", done)
+    summary[1].metric("Всего", total)
+    summary[2].metric("Пропущено", int(snapshot.get("skipped", 0) or 0))
+    summary[3].metric("Ошибки", errors)
+    if errors:
+        st.warning("Часть файлов не обработана. Откройте результаты, чтобы найти проблемные элементы.")
+    else:
+        st.success("Подписи созданы. Рекомендуется быстро проверить результат перед обучением.")
+    actions = st.columns(3)
+    if actions[0].button("Проверить результаты", type="primary", width="stretch"):
+        ss.main_page = "Результаты"
+        st.rerun()
+    if actions[1].button("Посмотреть запуск", width="stretch"):
+        ss.main_page = "Запуски"
+        st.rerun()
+    if actions[2].button("Настроить новый запуск", width="stretch"):
+        ss.show_setup_after_finish = True
+        st.rerun()
 
 def render_workspace() -> None:
     ss = st.session_state
@@ -26,12 +126,19 @@ def render_workspace() -> None:
     snapshot = worker.snapshot()
     folder = ss.get("folder", "")
     view = workspace_view(folder, ss.get("scan_info"), snapshot)
+
+    if snapshot.get("running"):
+        _render_active_run(snapshot)
+        return
+    if snapshot.get("finished") and not ss.get("show_setup_after_finish", False):
+        _render_finished_run(snapshot)
+        return
     mode_labels = {
-        "caption": "Продолжить обработку",
-        "missing": "Заполнить пропуски",
-        "update": "Обновить подписи",
-        "all": "Пересоздать всё",
-        "skip_processed": "Учитывать дату файлов",
+        config.MODE_ONLY_MISSING: "Продолжить: заполнить пропуски",
+        config.MODE_RESUME: "Докачать по реестру Tag Manager",
+        config.MODE_UPDATE: "Обновить существующие подписи",
+        config.MODE_ALL: "Пересоздать все подписи",
+        config.MODE_SKIP_PROCESSED: "Обработать изменённые файлы",
     }
     pipeline_labels = {
         "description_only": "Описание",
@@ -40,7 +147,10 @@ def render_workspace() -> None:
         "tags_to_vlm_context": "Теги помогают описанию",
     }
 
-    section_heading("РАБОТА", "Подготовьте запуск")
+    section_heading(
+        "ВЫПОЛНЯЕТСЯ" if snapshot.get("running") else "РАБОТА",
+        "Текущий запуск" if snapshot.get("running") else "Подготовьте запуск",
+    )
     ss.setdefault("workspace_folder", folder)
     ss.setdefault("workspace_recursive", bool(ss.get("recursive", False)))
     pick = st.columns([5, 1, 1], vertical_alignment="bottom")
@@ -66,6 +176,53 @@ def render_workspace() -> None:
         app_settings.save_settings(dict(ss))
         st.rerun()
 
+    st.markdown("### Что сделать")
+    intent_col, result_col = st.columns(2)
+    mode_options = list(mode_labels)
+    legacy_modes = {
+        "caption": config.MODE_ONLY_MISSING, "missing": config.MODE_ONLY_MISSING,
+        "update": config.MODE_UPDATE, "all": config.MODE_ALL,
+        "skip_processed": config.MODE_SKIP_PROCESSED,
+    }
+    current_mode = legacy_modes.get(ss.get("mode"), ss.get("mode", mode_options[0]))
+    if current_mode not in mode_options:
+        current_mode = mode_options[0]
+    with intent_col:
+        ss.mode = st.selectbox(
+            "Какие файлы обработать",
+            mode_options,
+            index=mode_options.index(current_mode),
+            format_func=mode_labels.get,
+            help="Безопасный вариант по умолчанию — продолжить незавершённую обработку.",
+            disabled=not view.can_change_dataset,
+        )
+    pipeline_options = list(pipeline_labels)
+    current_pipeline = ss.get("pipeline_mode", pipeline_options[0])
+    if current_pipeline not in pipeline_options:
+        current_pipeline = pipeline_options[0]
+    with result_col:
+        ss.pipeline_mode = st.selectbox(
+            "Что сохранить в подписи",
+            pipeline_options,
+            index=pipeline_options.index(current_pipeline),
+            format_func=pipeline_labels.get,
+            help="Обычное описание подходит для большинства caption-датасетов.",
+            disabled=not view.can_change_dataset,
+        )
+    if ss.pipeline_mode != "description_only":
+        from core.taggers.registry import TAGGER_SPECS
+        installed = [key for key in TAGGER_SPECS if ss.tagger_manager.installed(key)]
+        ss.pipeline_tagger_ids = st.multiselect(
+            "Модели тегов",
+            installed,
+            default=[key for key in ss.get("pipeline_tagger_ids", []) if key in installed],
+            help="Установка дополнительных моделей находится в разделе «Ресурсы».",
+        )
+        if not installed:
+            st.warning("Модели тегов не установлены. Выберите «Описание» или установите модель в «Ресурсах».")
+
+    app_settings.save_settings_if_changed(ss)
+
     mode_banner(
         expert=bool(ss.get("show_advanced", False)),
         title="Ручной контроль включён" if ss.get("show_advanced", False) else "Автоматическая конфигурация активна",
@@ -73,7 +230,7 @@ def render_workspace() -> None:
                if ss.get("show_advanced", False)
                else "Программа сама подбирает параметры модели и использование ресурсов."),
         settings={
-            "Метод": mode_labels.get(ss.get("mode", "caption"), ss.get("mode", "caption")),
+            "Метод": mode_labels.get(ss.get("mode", config.MODE_RESUME), ss.get("mode", config.MODE_RESUME)),
             "Модель": os.path.basename(ss.get("llama_model") or ss.get("model", "auto")),
             "Результат": pipeline_labels.get(ss.get("pipeline_mode", "description_only"), "Описание"),
             "Статус": view.phase,
@@ -123,6 +280,13 @@ def render_workspace() -> None:
 
     if ss.get("backend_type") == "managed_llama" and not ss.get("show_advanced", False):
         with st.expander("Выбрать модель", expanded=True):
+            refresh_col, refresh_hint = st.columns([1, 4], vertical_alignment="center")
+            if refresh_col.button("Обновить список", key="refresh_auto_model_library"):
+                clear_model_library_cache()
+                st.rerun()
+            refresh_hint.caption(
+                "Список кэшируется: изменение промпта больше не сканирует GGUF-файлы заново."
+            )
             model_dir = st.text_input(
                 "Папка VLM-моделей", value=ss.get("model_directory", ""),
                 key="auto_model_directory",

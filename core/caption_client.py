@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import mimetypes
 import os
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -61,6 +62,10 @@ class CaptionResult:
     attempts: int = 0
     quality_reason: str = ""
     stopped: bool = False  # True — прервано пользователем (это не ошибка файла)
+    prompt_tokens: int | None = None
+    generated_tokens: int | None = None
+    elapsed_seconds: float | None = None
+    finish_reason: str | None = None
 
 
 def _is_model_loading(exc: Exception) -> bool:
@@ -92,6 +97,9 @@ class CaptionClient:
         self.model = model
         self.timeout = timeout
         self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+        self._last_usage: tuple[int | None, int | None] = (None, None)
+        self._last_elapsed: float | None = None
+        self._last_finish_reason: str | None = None
 
     def check_connection(self) -> tuple[bool, str]:
         """Проверить доступность API (список моделей)."""
@@ -192,6 +200,8 @@ class CaptionClient:
         top_p: float,
         should_stop=None,
         disable_thinking: bool = False,
+        on_stream=None,
+        reasoning_budget: int | None = None,
     ) -> str:
         """Один стриминговый вызов.
 
@@ -208,11 +218,10 @@ class CaptionClient:
         маркеры (см. _build_messages). Сервера, не знающие опций, их игнорируют.
         """
         extra_body = None
-        if disable_thinking:
-            extra_body = {
-                "chat_template_kwargs": {"enable_thinking": False},
-                "reasoning_budget": 0,
-            }
+        if disable_thinking or reasoning_budget is not None:
+            budget = 0 if disable_thinking else max(0, int(reasoning_budget or 0))
+            extra_body = {"chat_template_kwargs": {"enable_thinking": budget > 0},
+                          "reasoning_budget": budget}
         stream = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
@@ -220,24 +229,40 @@ class CaptionClient:
             max_tokens=max_tokens,
             top_p=top_p,
             stream=True,
+            stream_options={"include_usage": True},
             extra_body=extra_body,
         )
         parts: list[str] = []
         finish_reason: str | None = None
+        prompt_tokens = generated_tokens = None
+        started = time.monotonic()
         try:
             for chunk in stream:
                 if should_stop and should_stop():
                     raise StopRequested()
                 choices = getattr(chunk, "choices", None)
+                usage = getattr(chunk, "usage", None)
+                if usage is not None:
+                    prompt_tokens = getattr(usage, "prompt_tokens", prompt_tokens)
+                    generated_tokens = getattr(usage, "completion_tokens", generated_tokens)
                 if not choices:
                     continue
                 delta = choices[0].delta
                 piece = getattr(delta, "content", None)
+                reasoning_piece = (
+                    getattr(delta, "reasoning_content", None)
+                    or getattr(delta, "reasoning", None)
+                )
                 if piece:
                     parts.append(piece)
+                if on_stream and (piece or reasoning_piece):
+                    on_stream(time.monotonic() - started, len(parts))
                 if choices[0].finish_reason:
                     finish_reason = choices[0].finish_reason
         finally:
+            self._last_usage = (prompt_tokens, generated_tokens)
+            self._last_elapsed = time.monotonic() - started
+            self._last_finish_reason = finish_reason
             # Рвём соединение в любом исходе (стоп/ошибка/конец) — освобождает слот.
             try:
                 stream.close()
@@ -264,6 +289,8 @@ class CaptionClient:
         should_stop=None,
         on_attempt=None,
         disable_thinking: bool = False,
+        on_stream=None,
+        reasoning_budget: int | None = None,
     ) -> str:
         """Один API-вызов (стриминговый) с обработкой сбоев.
 
@@ -285,6 +312,8 @@ class CaptionClient:
                 messages, temperature, max_tokens, top_p,
                 should_stop=should_stop,
                 disable_thinking=disable_thinking,
+                on_stream=on_stream,
+                reasoning_budget=reasoning_budget,
             )
 
         def is_retryable(exc: Exception) -> bool:
@@ -320,6 +349,8 @@ class CaptionClient:
         max_caption_retries: int | None = None,
         should_stop=None,
         disable_thinking: bool = False,
+        on_stream=None,
+        reasoning_budget: int | None = None,
     ) -> CaptionResult:
         """
         Сгенерировать капшен для одного изображения с проверкой качества.
@@ -348,6 +379,8 @@ class CaptionClient:
                 messages, temperature, max_tokens, top_p,
                 should_stop=should_stop, on_attempt=on_attempt,
                 disable_thinking=disable_thinking,
+                on_stream=on_stream,
+                reasoning_budget=reasoning_budget,
             )
 
         policy = CaptionQualityPolicy(retries, RETRY_REINFORCEMENT, evaluate_caption)
@@ -373,4 +406,8 @@ class CaptionClient:
             caption=outcome.caption,
             attempts=outcome.attempts,
             quality_reason=outcome.quality_reason,
+            prompt_tokens=self._last_usage[0],
+            generated_tokens=self._last_usage[1],
+            elapsed_seconds=self._last_elapsed,
+            finish_reason=self._last_finish_reason,
         )

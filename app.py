@@ -218,8 +218,15 @@ poll = ss.worker.is_alive() or ss.preview_runner.is_alive()
 
 if page == "Работа":
     render_workspace()
-    with st.expander("Настройка и запуск", expanded=bool(ss.folder)):
-        poll = render_generation_tab() or poll
+    if not _header_snapshot.get("running"):
+        with st.expander(
+            "Параметры и запуск",
+            expanded=bool(ss.folder) and (
+                not _header_snapshot.get("finished")
+                or bool(ss.get("show_setup_after_finish", False))
+            ),
+        ):
+            poll = render_generation_tab(show_source=False) or poll
 elif page == "Результаты":
     result_page = st.segmented_control(
         "Инструмент результатов", ["Галерея", "Массовые правки", "Здоровье"],

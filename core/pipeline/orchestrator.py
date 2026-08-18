@@ -12,7 +12,6 @@ from typing import Callable
 
 from core.pipeline.models import PipelineResult, RunProvenance, ScoredTag, TaggerResult, VLMResult
 from core.pipeline.policies import FailureAction, PipelineMode, PipelinePolicy
-from core.prompt_builder import build_user_prompt
 from core.taggers.normalize import TagFilterPolicy, normalize_tagger_result
 
 
@@ -75,6 +74,7 @@ class PipelineOrchestrator:
         merged = merge_tagger_results(raw_results)
         vlm_result = None
         if needs_vlm:
+            from core.prompt_builder import build_user_prompt
             if self.backend is None:
                 return PipelineResult(False, tagger_results=raw_results, error="VLM backend is not configured")
             prompt = build_user_prompt(user_prompt, [merged]) if mode in (

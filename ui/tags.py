@@ -42,9 +42,21 @@ def render_tags_tab() -> None:
                    "не конфликтовать с записью файлов — остановите обработку.")
         return
 
-    folder, recursive = folder_picker_row(
-        "tags_folder_input", "tags_rec", ss.tags_recursive,
-        ss.tags_folder or ss.folder)
+    if ss.get("folder") and os.path.isdir(ss.folder) and not ss.get("tags_choose_folder", False):
+        folder, recursive = ss.folder, bool(ss.get("recursive", False))
+        context_col, action_col = st.columns([5, 1], vertical_alignment="center")
+        context_col.info(f"Текущий dataset: {folder}")
+        if action_col.button("Сменить", key="tags_change_dataset"):
+            ss.tags_choose_folder = True
+            st.rerun()
+        if ss.tags_folder != folder or not ss.tags_files:
+            ss.tags_folder = folder
+            ss.tags_recursive = recursive
+            ss.tags_files = ds.find_caption_files(folder, recursive)
+    else:
+        folder, recursive = folder_picker_row(
+            "tags_folder_input", "tags_rec", ss.tags_recursive,
+            ss.tags_folder or ss.folder)
 
     if st.button("Сканировать dataset", type="primary"):
         if os.path.isdir(folder):
@@ -53,6 +65,7 @@ def render_tags_tab() -> None:
             ss.tags_files = ds.find_caption_files(folder, recursive)
             ss.tags_freq = None
             ss.tags_pending = None
+            ss.tags_choose_folder = False
             st.toast(f"Капшенов найдено: {len(ss.tags_files)}")
         else:
             st.error("Папка не найдена")

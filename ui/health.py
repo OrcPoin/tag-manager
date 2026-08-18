@@ -59,9 +59,17 @@ def render_health_tab() -> None:
                    "не конфликтовать с записью файлов — остановите обработку.")
         return
 
-    folder, recursive = folder_picker_row(
-        "health_folder_input", "health_rec", ss.health_recursive,
-        ss.health_folder or ss.folder)
+    if ss.get("folder") and os.path.isdir(ss.folder) and not ss.get("health_choose_folder", False):
+        folder, recursive = ss.folder, bool(ss.get("recursive", False))
+        context_col, action_col = st.columns([5, 1], vertical_alignment="center")
+        context_col.info(f"Текущий dataset: {folder}")
+        if action_col.button("Сменить", key="health_change_dataset"):
+            ss.health_choose_folder = True
+            st.rerun()
+    else:
+        folder, recursive = folder_picker_row(
+            "health_folder_input", "health_rec", ss.health_recursive,
+            ss.health_folder or ss.folder)
 
     if st.button("Проверить dataset", type="primary"):
         if not os.path.isdir(folder):
@@ -84,6 +92,7 @@ def render_health_tab() -> None:
             bar.empty()
             ss.health_folder = folder
             ss.health_recursive = recursive
+            ss.health_choose_folder = False
             ss.health = {
                 "images": images,
                 "probes": probes,

@@ -26,8 +26,8 @@ class LlamaCppBackend(ExternalApiBackend):
             timeout,
         )
 
-    def start(self):
-        return self.process_manager.start()
+    def start(self, *, should_stop=None):
+        return self.process_manager.start(should_stop=should_stop)
 
     def stop(self) -> bool:
         return self.process_manager.stop()
@@ -48,9 +48,13 @@ class BackendManager:
     def __init__(self):
         self._lock = threading.RLock()
         self._managed: LlamaCppBackend | None = None
+        self._stop_timer: threading.Timer | None = None
 
     def managed(self, config: LlamaServerConfig, *, timeout: float) -> LlamaCppBackend:
         with self._lock:
+            if self._stop_timer is not None:
+                self._stop_timer.cancel()
+                self._stop_timer = None
             if self._managed and self._managed.process_manager.config != config:
                 if self._managed.process_manager.running:
                     # Keep ownership of the live process. UI edits become effective
@@ -68,7 +72,22 @@ class BackendManager:
 
     def stop_managed(self) -> bool:
         with self._lock:
+            if self._stop_timer is not None:
+                self._stop_timer.cancel()
+                self._stop_timer = None
             return not self._managed or self._managed.stop()
+
+    def stop_managed_after(self, seconds: float) -> bool:
+        """Keep the owned server warm briefly, without giving up lifecycle ownership."""
+        with self._lock:
+            if self._managed is None or not self._managed.process_manager.running:
+                return False
+            if self._stop_timer is not None:
+                self._stop_timer.cancel()
+            self._stop_timer = threading.Timer(max(0.0, seconds), self.stop_managed)
+            self._stop_timer.daemon = True
+            self._stop_timer.start()
+            return True
 
 
 class LlamaVersionStore:

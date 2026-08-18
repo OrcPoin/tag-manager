@@ -13,13 +13,15 @@ from ui.design import empty_state, section_heading
 def render_runs() -> None:
     ss = st.session_state
     snapshot = ss.worker.snapshot()
-    section_heading("ЗАПУСКИ", "История обработки")
+    section_heading("ЗАПУСКИ", "История обработки",
+                    "Здесь хранятся результаты и фактические параметры прошлых запусков.")
 
-    active = st.columns(4)
-    active[0].metric("Состояние", snapshot.get("status_msg") or "Готов")
-    active[1].metric("Готово", f"{snapshot.get('done', 0)}/{snapshot.get('total', 0)}")
-    active[2].metric("Ошибки", snapshot.get("errors", 0))
-    active[3].metric("Номер запуска", snapshot.get("run_id") or "—")
+    if snapshot.get("running"):
+        st.info(f"Сейчас выполняется: {snapshot.get('status_msg') or 'обработка'}")
+        active = st.columns(3)
+        active[0].metric("Готово", f"{snapshot.get('done', 0)}/{snapshot.get('total', 0)}")
+        active[1].metric("Ошибки", snapshot.get("errors", 0))
+        active[2].metric("Запуск", snapshot.get("run_id") or "—")
 
     folder = ss.get("folder", "")
     if not folder or not os.path.isdir(folder):
@@ -30,8 +32,19 @@ def render_runs() -> None:
         empty_state("Запусков пока нет", "Начните обработку, чтобы сохранить её параметры и результат.")
         return
 
-    st.markdown("### История")
-    for run in runs:
+    latest, older = runs[0], runs[1:]
+    latest_summary = latest.get("summary") or {}
+    st.markdown("### Последний запуск")
+    latest_metrics = st.columns(4)
+    latest_metrics[0].metric("Статус", latest.get("status", "—"))
+    latest_metrics[1].metric("Готово", latest_summary.get("update_done") or latest_summary.get("done", 0))
+    latest_metrics[2].metric("Ошибки", latest_summary.get("update_errors") or latest_summary.get("errors", 0))
+    latest_metrics[3].metric("Модель", latest.get("model") or "—")
+
+    if not older:
+        return
+    st.markdown("### Предыдущие запуски")
+    for run in older:
         status = run.get("status", "unknown")
         label = f"{run.get('started_at', '')[:19]} · {status} · {run.get('model') or 'модель не указана'}"
         with st.expander(label):

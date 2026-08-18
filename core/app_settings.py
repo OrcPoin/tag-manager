@@ -57,6 +57,13 @@ PERSISTED_KEYS = (
     "pipeline_mode",
     "pipeline_tagger_ids",
     "ui_theme",
+    "desktop_keep_background",
+    "desktop_autostart",
+    "desktop_window_width",
+    "desktop_window_height",
+    "desktop_window_x",
+    "desktop_window_y",
+    "desktop_window_maximized",
 )
 
 # Ошибочное имя кратко использовалось в незавершённой версии настройки.
@@ -98,3 +105,12 @@ def save_settings(values: dict) -> None:
                 os.remove(tmp)
         except OSError:
             pass
+
+
+def save_settings_if_changed(values: dict) -> bool:
+    """Persist only when a sticky value changed; avoids fsync on every rerun."""
+    data = {k: values[k] for k in PERSISTED_KEYS if k in values}
+    if load_settings() == data:
+        return False
+    save_settings(data)
+    return True

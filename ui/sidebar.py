@@ -13,7 +13,7 @@ import streamlit as st
 import config
 from core import app_settings
 from core.inference.installer import LlamaCppInstaller, discover_gguf
-from core.models.library import scan_model_library
+from core.models.library import clear_model_library_cache, scan_model_library
 from core.inference.profiles import capture_profile, save_backend_profiles
 from core.diagnostics import export_diagnostics
 from ui.context import get_client, get_params, get_registry, logger
@@ -110,6 +110,10 @@ def render_sidebar() -> None:
                 "Папка моделей", ss.model_directory,
                 help="Папка сканируется автоматически; вручную вводить имя GGUF не нужно.",
             )
+            if st.button("Обновить список моделей", key="refresh_advanced_model_library",
+                         width="stretch"):
+                clear_model_library_cache()
+                st.rerun()
             library = scan_model_library(
                 ss.model_directory, mmproj_roots=(ss.mmproj_directory,)
             )

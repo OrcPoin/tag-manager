@@ -49,3 +49,18 @@ def build_user_prompt(user_prompt: str, tagger_results: list[TaggerResult] | Non
     base = (user_prompt or "").rstrip()
     context = build_tagger_context(tagger_results or [])
     return base if not context else f"{base}\n\n{context}"
+
+
+def build_vlm_augment_prompt(user_prompt: str, existing_caption: str) -> str:
+    """Ask VLM for a new prose block without changing the existing caption."""
+    existing = (existing_caption or "").strip()
+    instruction = (
+        "The caption file already contains the tags or text shown below. Use them as "
+        "reference data together with the image. Return only a new natural English "
+        "description to append below them. Do not repeat, rewrite, remove, or reformat "
+        "the existing text, and do not repeat its tag list."
+    )
+    return (
+        f"{(user_prompt or '').rstrip()}\n\n{instruction}"
+        f"\n\n<existing_caption>\n{existing}\n</existing_caption>"
+    )

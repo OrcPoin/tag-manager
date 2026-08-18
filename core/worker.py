@@ -313,6 +313,7 @@ class CaptionWorker:
     def _run(self) -> None:
         p = self._params
         pipeline_mode = PipelineMode(p.get("pipeline_mode", PipelineMode.DESCRIPTION_ONLY))
+        managed_started_here = False
         pipeline_taggers = []
         if p.get("pipeline_tagger_ids"):
             manager = TaggerManager(p.get("tagger_root", "taggers"))
@@ -322,6 +323,17 @@ class CaptionWorker:
                 except Exception as exc:  # optional provider must not break VLM-only
                     self._log(f"tagger {tagger_id} недоступен: {exc}", "warning")
         try:
+            # Auto mode owns the managed backend lifecycle.  Starting it in this
+            # background thread keeps Streamlit responsive while llama.cpp loads.
+            if (pipeline_mode != PipelineMode.TAGS_ONLY
+                    and getattr(self._client, "backend_name", "") == "managed_llama_cpp"):
+                health = self._client.health()
+                if not health.ready:
+                    self._set_status("Подготовка модели: запускаю llama.cpp…")
+                    self._log("Автозапуск managed llama.cpp")
+                    self._client.start(should_stop=self._stop_event.is_set)
+                    managed_started_here = True
+                    self._set_status("Модель готова. Начинаю обработку…")
             while not self._stop_event.is_set() and not self.state.is_finished():
                 # Пауза: ждём resume/stop, ничего не генерируя.
                 if self._pause_event.is_set():
@@ -429,6 +441,13 @@ class CaptionWorker:
             self._set_status(f"Сбой: {exc}")
             self._finish_run("failed")
         finally:
+            if managed_started_here and self._client:
+                self._set_status("Завершаю llama.cpp…")
+                try:
+                    self._client.stop()
+                    self._log("Managed llama.cpp завершён автоматически")
+                except Exception as exc:  # noqa: BLE001
+                    self._log(f"Не удалось завершить managed llama.cpp: {exc}", "warning")
             with self._lock:
                 self.running = False
                 self.paused = False
